@@ -165,7 +165,7 @@ if __name__ == '__main__':
 
 
     if args.train_continue:
-        checkpoint = torch.load( args.exp_dir + 'ckpts/' + args.ckpt + '.path.tar')
+        checkpoint = torch.load( args.exp_dir + 'ckpts/' + args.ckpt + '.path.tar', weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         # optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weightdecay)
@@ -175,7 +175,7 @@ if __name__ == '__main__':
         print("Now continue training")
 
     if args.eval:
-        checkpoint = torch.load( args.exp_dir + 'ckpts/' + args.ckpt + '.path.tar')
+        checkpoint = torch.load( args.exp_dir + 'ckpts/' + args.ckpt + '.path.tar', weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         epochs = checkpoint['epoch']

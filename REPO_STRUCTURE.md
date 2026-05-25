@@ -1,3 +1,4 @@
+
 # IntelligentCarpet — Repository Structure & Code Guide
 
 ## Project Overview
