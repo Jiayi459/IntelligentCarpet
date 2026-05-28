@@ -268,7 +268,6 @@ New total accounted body-mass fraction with Option C: **0.907 + 0.081 = 0.988**.
 ---
 
 ## CoM Prediction Plan (drafted 2026-05-25)
-
 ### High-level goal
 Determine whether the IntelligentCarpet pipeline supports **forecasting** CoM ~1 second into the future, in addition to estimating CoM at the current instant.
 
@@ -956,6 +955,56 @@ User reversed earlier "wait for GPU" decision: "yes start phase 1 training." Scr
 1. Consider re-evaluating on a *high-motion subset* (frames where CoM velocity > some threshold). Persistence will be much weaker there, and forecasting methods will look better. Probably the more scientifically informative evaluation.
 2. Should we train the GRU longer (100+ epochs) before declaring its ceiling? Right now it's not clearly converged.
 3. The 86 mm persistence-at-1s number is **the official Phase 1 floor** for the Phase 2 comparison.
+
+### Ranked next-step plan with GPU now available (2026-05-28)
+
+User now has access to Notre Dame's CRC (Center for Research Computing) GPU resources. The 6 candidate next steps, ranked by priority for the project's central question — *does the IntelligentCarpet pipeline forecast next-second CoM beyond what CoM history alone can do?*
+
+| # | Step | Why this rank | Effort | GPU? |
+|---|---|---|---:|:-:|
+| 1 | **CRC env setup + Phase 0 GPU sanity** — re-run compute_com.py with --max_batches 7 on GPU. Confirm same numbers as CPU and ~30× speedup. | Prerequisite for everything below. Surface blockers (CUDA version, wheels, storage) on day 1, not week 1. | 0.5–2 days | ✅ |
+| 2 | **Phase 2 — tactile-conditioned forecaster** (β tactile-only, γ fused, δ keypoints-only). Frozen 2D-CNN front-end + GRU head. | Central scientific question. Without this the project has no headline result. | 2–4 days | ✅ heavy |
+| 3 | **High-motion subset re-evaluation** — filter test samples where GT CoM velocity > threshold. Re-compute Phase 1 metrics on this subset. | Test set is 70% low-motion frames where persistence is information-theoretically unbeatable. Without this, Phase 2 gains will look smaller than deserved. | <1 hour | ❌ |
+| 4 | **Strengthen Phase 1 GRU floor** — hidden 256–512, 2–3 layers, 200+ epochs, delta-prediction. Confirm true history-only ceiling. | Guards against the trap of "Phase 2 looks good only because Phase 1 was undertrained". Only critical if Phase 2 result is ambiguous. | 1 day | ✅ |
+| 5 | **Cross-subject leave-one-out** — re-do Phase 1 + 2 with held-out subjects. Tests Q5 ultimate goal. | Premature without a working in-subject forecaster. YiyueLuo's 33% sample dominance complicates the balance. | 2–3 days | ✅ |
+| 6 | **Phase 3 — world models (JEPA)** | Only attempted if Phase 2 establishes that tactile adds real value. Otherwise scaling up a hypothesis that failed its small-model test. | weeks | ✅ heavy |
+
+**Sequencing**: do (1), then (2) and (3) in parallel. After Phase 2 results land:
+- clean win for tactile → proceed to (5) for the Q5 ultimate goal
+- ambiguous → do (4) and re-evaluate
+- clear lift, want a flashier method → consider (6)
+- no lift → write up honest negative result
+
+**Pushback on record**: do NOT skip step 3 even with GPU available. Test-set imbalance toward static recordings will mask genuine Phase 2 gains. Half-hour of motion-filtering pays back 10× in interpretive clarity.
+
+### Step 1 in progress (2026-05-28): CRC setup
+Following https://docs.crc.nd.edu/new_user/quick_start.html. User is at NYU (jh9141@nyu.edu) but has access to ND CRC (likely via collaboration).
+
+**Step-by-step plan delivered to user. Sequenced so each stage's success gates the next.**
+
+| Stage | Goal | Key commands |
+|---|---|---|
+| A | Account access. Verify ND NetID, log into okta.nd.edu (sets up DUO), install MobaXterm on Windows. | — |
+| B | First SSH login. | `ssh netid@crcfe01.crc.nd.edu`, then `quota`, `whoami` |
+| C | One-time conda init. | `module load conda && conda init && source ~/.bashrc` |
+| D | Create env + install PyTorch CUDA. | `conda create -n carpet python=3.10 -y`; `module load cuda/12.1`; `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121`; `pip install numpy opencv-python matplotlib scipy h5py progressbar2` |
+| E | GPU verification (interactive session, no project data). | `qrsh -q gpu -l gpu_card=1 -pe smp 1`; then `python -c "import torch; print(torch.cuda.is_available())"` |
+| F | Code transfer + data. | `git clone https://github.com/Jiayi459/IntelligentCarpet.git`; data: re-download from Dropbox links in README.md via `wget` directly on CRC (faster than laptop→cluster). Email `CRCSupport@nd.edu` for `/scratch365` access — 22 GB dataset shouldn't sit in AFS home. |
+| G | Smoke test on GPU. | `python train/com/compute_com.py --max_batches 7` (~30 s on GPU vs 20 s on CPU; full Phase 0 reproduces 3 h CPU run in 3–10 min) |
+| H | Batch jobs for Phase 2. | UGE template: `#$ -q gpu -l gpu_card=1 -pe smp 4 -l h_rt=04:00:00`; submit with `qsub`, monitor with `qstat -u $USER` |
+
+**Blocking questions returned to user:**
+1. Does the user actually have an ND NetID? (NYU email + ND CRC access is unusual — likely via collaboration, but the SSH login needs the ND NetID, not NYU credentials.)
+2. Which stage is the user currently on?
+
+**Key CRC facts captured for future reference:**
+- Front-end hosts (`crcfe01`, `crcfe02`) have a **1-hour runtime limit** — never run inference / training there directly. Always go through `qrsh` (interactive) or `qsub` (batch).
+- GPU queue request: `-q gpu -l gpu_card=1 -pe smp N`. Max runtime 4 days.
+- Available CUDA modules: 10.0, 10.2, 11.0, 11.2, 11.6, 11.8, 12.1. **Use 12.1** to match a current PyTorch CUDA build.
+- Available cuDNN modules: 7.0, 7.4, 8.0.4, 8.9.3.
+- Storage: AFS home (100 GB) for code; `/scratch365/<netid>` (request via email) for datasets; `/tmp` on compute nodes is ephemeral.
+- AFS retires May 2027, Panasas (scratch365) retires June 2026 — both well beyond this project's window.
+- Windows users: MobaXterm Home Edition handles SSH + SFTP in one tool.
 
 ### CSV enrichment + subject-count correction (2026-05-25, eleventh turn)
 
