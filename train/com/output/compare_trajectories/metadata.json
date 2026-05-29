@@ -1,0 +1,31 @@
+{
+  "seed": 42,
+  "n_samples_plotted": 5,
+  "methods_plotted": [
+    "persistence",
+    "phase1_gru_com",
+    "phase2_v1_gru_kp",
+    "phase2_v2_gru_kp"
+  ],
+  "sample_indices_in_test": [
+    4064,
+    2305,
+    3438,
+    468,
+    2275
+  ],
+  "sample_frame_centers": [
+    25679,
+    17563,
+    25053,
+    3385,
+    17189
+  ],
+  "sample_subjects": [
+    "YiyueLuo",
+    "TongZhang",
+    "YiyueLuo",
+    "MantianXue",
+    "TongZhang"
+  ]
+}

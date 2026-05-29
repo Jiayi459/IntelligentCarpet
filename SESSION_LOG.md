@@ -1135,3 +1135,290 @@ Under `train/com/output/phase2_keypoints/`:
 - `error_vs_horizon_z.png` — same restricted to the z axis.
 - `comparison_phase1_vs_phase2.png` — side-by-side bar chart of median error and skill score.
 - `gru_model.pt` — trained Phase 2 GRU weights.
+
+---
+
+### Phase 2 v2 (δ′: bigger + longer + delta target) — first method to beat persistence (2026-05-29)
+
+Script: `train/com/train_phase2_keypoints_v2.py`. Same per-session 70/30 split, same outlier filter, same 17,218 / 5,255 sample counts, same camera-derived 21-keypoint input as v1. Three changes vs v1:
+
+| change | v1 | v2 |
+|---|---|---|
+| GRU hidden / layers | 64 / 1 | 256 / 2 (+ dropout 0.1) |
+| Epochs | 50 | 200 (best-val checkpointing) |
+| Target framing | absolute future CoM | delta from `CoM(t)` |
+
+**Headline (1-s horizon, n_test = 5255):**
+
+| method | input | median 3D | mean 3D | p95 3D | skill |
+|---|---|---:|---:|---:|---:|
+| persistence | — | 54.1 | 92.2 | 327.2 | 1.000 |
+| Phase 1 GRU (CoM-only, small, abs) | camera CoM | 61.1 | 88.8 | 261.3 | 1.128 |
+| Phase 2 v1 GRU (kp, small, abs) | camera 21-kp | 66.3 | 93.4 | 265.0 | 1.225 |
+| **Phase 2 v2 GRU (kp, big, delta)** | camera 21-kp | **46.8** | **79.7** | 269.0 | **0.864** |
+
+**First method in the project to clear the persistence bar.** 13.6 % skill improvement at 1 s, also wins on mean.
+
+**Per-horizon — where the win lives:**
+| h (frame) | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| persistence | 16.8 | 30.4 | 42.9 | 53.3 | 64.1 | 71.5 | 77.4 | 81.2 | 83.8 | 85.7 |
+| Phase 2 v2 | 17.9 | 27.8 | 35.6 | 42.9 | 50.6 | 58.0 | 65.5 | 71.9 | 78.4 | 86.2 |
+
+- h=1: persistence still slightly better (it *is* the answer to "where will you be in 0.1 s").
+- h=3–9: v2 wins decisively (up to ~21 % at h=5).
+- h=10: converges within 0.5 mm — both methods at their respective trajectory-mean ceilings.
+
+**Per-axis paradox:** Persistence still has the lower per-axis median on x, y, AND z (21.2 / 19.7 / 9.4 vs v2's 21.4 / 21.1 / 12.2). v2 wins 3D Euclidean median anyway because per-sample errors are more *isotropic* — `median_3D / L2(per_axis_medians)` is 1.78 for persistence vs 1.44 for v2. Persistence has more axis-aligned blowups (one big axis at a time); v2 spreads error more evenly so the joint magnitude stays smaller more often.
+
+**Confound to flag before celebrating:** v1 → v2 bundles three simultaneous changes. We don't know which carried the gain. Most-likely driver: delta target (v1 was trying to predict absolute O(1000 mm) positions with no anchor, a much harder regression). Confirming this requires an ablation: {delta-only, size-only, 200ep-only}.
+
+**Per-subject (v2):** best TongZhang 32.5 mm, worst MantianXue 64.6 mm. 2× spread, similar pattern to Phase 1.
+
+---
+
+### Phase 2 β tactile-only — central scientific question got a negative answer (2026-05-29)
+
+Script: `train/com/train_phase2_tactile.py`. Cached the entire `(T=32600, 96, 96)` tactile stack into `train/com/output/tactile_all.npy` (~1.2 GB) for fast random-access slicing during training. Model: per-frame 3-layer 2D CNN (96→48→24→12 + AdaptiveAvgPool) → 128-d features → GRU(128) over 100-frame window → 10-frame CoM delta. The CNN encoder is trained from scratch — does NOT reuse the frozen `tile2openpose_conv3d` frontend.
+
+**Result — flat-out negative:**
+
+| method | input | median 3D | mean 3D | p95 3D | skill |
+|---|---|---:|---:|---:|---:|
+| persistence | — | 54.1 | 92.2 | 327.2 | 1.000 |
+| Phase 1 GRU | camera CoM | 61.1 | 88.8 | 261.3 | 1.128 |
+| Phase 2 v2 GRU | camera 21-kp | 46.8 | 79.7 | 269.0 | 0.864 |
+| **Phase 2 tactile** | **tactile only** | **63.7** | 99.8 | 328.0 | **1.176** |
+
+Tactile-only is:
+- 17.6 % worse than persistence (median),
+- worse than Phase 1 GRU (3-dim CoM input alone outperforms 100×96×96 of tactile),
+- 36 % worse than Phase 2 v2 (which has the same delta target and same train/test split),
+- worse than persistence at **every** horizon (no horizon recovery).
+
+**Per-axis:** x=27.1 / y=25.9 / z=18.2 — worse than persistence on all three axes including z (where pre-movement weight shifts were supposed to be tactile's edge).
+
+**Per-subject:** still recognizable rank order (TongZhang best, YunzhuLi worst), median 45-77 mm range — the model isn't degenerate, just under-informative for forecasting.
+
+**Important caveats — do NOT call tactile dead from this run alone:**
+1. **Compute parity not enforced.** Tactile ran 50 epochs vs v2's 200. The CNN encoder is being learned from scratch (much harder optimization than v2's MLP-on-clean-input).
+2. **Conservative architecture.** 3-layer CNN + AdaptiveAvgPool(1) collapses all spatial structure into 128 scalars before any sequence modeling — pose-relevant spatial detail is destroyed. The original IntelligentCarpet CNN has a much heavier frontend; could literally be grafted in.
+3. **No fused γ baseline yet.** The right question is "does tactile add value *on top of* CoM/pose history?", not "is tactile alone enough?". γ (tactile + CoM history → CoM future) was the model designed to answer that and hasn't been built.
+4. **Deployment-realistic comparison missing.** Phase 2 v2's input is *oracle* camera-derived poses. The realistic version is `kp_pred_mm` (CNN-from-tactile poses, the existing pipeline) → v2 forecaster. That number is the floor for "use the pipeline already in the repo," and we don't have it.
+
+Honest one-line take: **at parity training and naive encoder, raw tactile carries less forecastable information than 3 numbers of CoM history**. Surprising, but the controlled comparison to make it definitive hasn't been run yet.
+
+---
+
+### Ranked next-step plan (2026-05-29, after the three Phase 2 runs)
+
+| # | Step | Why this rank | Effort | GPU? |
+|---|---|---|---:|:-:|
+| 1 | **v2 ablation** — train v2 with one change at a time on top of v1 (delta-only; bigger-only; 200ep-only) to attribute the 66.3 → 46.8 gain. | The headline "first method to beat persistence" rests on knowing *which* of three simultaneous changes mattered. Without this, we can't generalize the recipe to tactile. | 3 short runs, ~1 h GPU total | ✅ |
+| 2 | **Phase 2 tactile @ parity** — 200 epochs, larger encoder, optional frozen `tile2openpose` frontend, delta target (already there). | Current tactile vs v2 comparison is unfair on compute. Until tactile runs at v2-equivalent scale, the negative result is provisional. | one overnight run | ✅ |
+| 3 | **γ fused** — tactile + CoM history concatenated into one forecaster. The model that actually answers the central project question ("does tactile add value beyond pose history?"). | This is the principled test. If γ ≤ v2, tactile-doesn't-help is the firm conclusion. If γ < v2, tactile's value is exactly the difference. | 1 day to code + train | ✅ |
+| 4 | **Deployment-realistic v2** — same v2 forecaster but fed `kp_pred_mm` (CNN-from-tactile keypoints) instead of `kp_gt_mm`. Quantifies the upstream-CNN-noise penalty on forecasting. | Tells us what the end-to-end "real" pipeline performance would be. Useful number even if we never re-train the CNN. | ~2 h | ✅ |
+| 5 | **High-motion subset re-evaluation** — filter test samples where ‖CoM velocity‖ > threshold; recompute all method medians on this subset. | Dataset is ~70 % static. Persistence is information-theoretically unbeatable on static frames; both v2's lead and tactile's gap should sharpen on moving frames. | <1 h, no training | ❌ |
+| 6 | **Cross-subject leave-one-out (Q5 "ultimate")** | Premature until v2/γ comparison settles. YiyueLuo's 33 % test-sample dominance will distort LOSO if not handled. | 2–3 days | ✅ |
+| 7 | **Phase 3 (JEPA world model)** | Only justified if Phase 2 (v2 or γ) shows tactile adds real value. Currently it doesn't. | weeks | ✅ heavy |
+
+**My recommendation:** sequence (1) and (2) in parallel — both are cheap. Then (3), which is the project's real headline question. (4) and (5) bolt on as interpretive context. (6) and (7) are gated on the (3) result.
+
+**Pushback on record:** if (1) shows the delta target alone explains v2's win (most likely, in my view), the tactile script's *target* framing is already right, so the negative tactile result becomes harder to dismiss as a training-setup issue. That would shift weight toward "encoder architecture" being the remaining lever, not "more epochs."
+
+---
+
+### Git workflow — CRC → GitHub → laptop (2026-05-29)
+
+User asked how to ship results from the CRC training node back to the local IDE. Standard one-direction flow: commit on CRC, push to GitHub, pull on laptop. Already set up: SSH key on CRC pointing at `git@github.com:Jiayi459/IntelligentCarpet.git` (from earlier session). `.gitignore` already excludes the dataset, the 1.2 GB `tactile_all.npy` cache, and `*.p` pickles under `train/com/output/`.
+
+**On CRC (after a training run finishes):**
+```bash
+cd ~/IntelligentCarpet
+git status                                # confirm only the intended files appear
+git add train/com/output/phase2_keypoints_v2/ \
+        train/com/output/phase2_tactile/ \
+        train/com/output/phase2_keypoints/   # whichever directories changed
+git commit -m "Phase 2 results: v2 keypoints (beats persistence) + tactile-only (negative)"
+git push origin main
+```
+
+Things NOT committed (and that's correct):
+- `train/com/output/tactile_all.npy` — 1.2 GB cache; regenerable.
+- `train/com/output/com_results.p` — 0.6 GB pickle; regenerable from compute_com.py.
+- `train/ckpts/`, `train/singlePerson_test/` — the dataset; re-download from Dropbox.
+
+Things that DO get committed (small, useful):
+- `metrics.json` for each phase — the source of truth for the headline numbers.
+- `*.png` plots.
+- `*.pt` model checkpoints — small (15k–500k params per file), worth versioning so the laptop can re-run inference without re-training.
+
+**On laptop:**
+```powershell
+cd C:\Users\haoji\IntelligentCarpet-1
+git status                                # verify clean (no local edits to overwrite)
+git pull origin main
+```
+Then view the new files under `train/com/output/phase2_*/`. To re-run any of the scripts locally on CPU:
+```powershell
+.\venv\Scripts\python.exe train\com\train_phase2_keypoints_v2.py
+```
+(would take many hours on CPU; only worth it for inference / debugging, not full training).
+
+**If `git pull` complains about local changes:** likely an editor-touched file. `git status` will name it. Either commit the local edit first (if intentional) or `git checkout -- <file>` to discard it (if not). Never `git reset --hard` without checking first — that nukes uncommitted work.
+
+**One-time SSH-key reminder:** the laptop is on HTTPS by default for this repo (set up earlier). HTTPS push from CRC was the blocker; HTTPS *pull* works fine on the laptop with no auth. Only the push side needed the SSH-key switch.
+
+#### Concrete sync sequence when both sides have local changes (recommended order)
+
+When the laptop has edits (e.g. SESSION_LOG.md just rewritten in chat) and CRC has new results, do not push both sides blindly — git will create a merge commit or refuse the second push. The clean order:
+
+**1. Laptop — commit + push the log/code edits FIRST**
+```powershell
+cd C:\Users\haoji\IntelligentCarpet-1
+git status                                # confirm only intended files
+git add SESSION_LOG.md                    # plus any code edits you want shipped
+git commit -m "SESSION_LOG: <what changed>"
+git push origin main
+```
+
+**2. CRC — pull-rebase (NOT pull-merge), then add results, then push**
+```bash
+cd ~/IntelligentCarpet
+git status                                # confirm output dirs are the only new things
+git pull --rebase origin main             # replays CRC commits on top of laptop's push
+git add train/com/output/phase2_keypoints_v2/ \
+        train/com/output/phase2_tactile/ \
+        train/com/output/phase2_keypoints/
+git commit -m "Phase 2 results: <what shipped>"
+git push origin main
+```
+
+**3. Laptop — pull the result files**
+```powershell
+cd C:\Users\haoji\IntelligentCarpet-1
+git pull origin main
+```
+
+Why `--rebase` on step 2 instead of plain `git pull`: plain pull creates a merge commit ("Merge branch 'main' of github.com:…") that clutters history. Rebase replays your local commits on top of the remote head, leaving a linear history. Safe to rebase here because the only "local commits" on CRC are the not-yet-pushed result commits — no shared history is being rewritten.
+
+If step 2 hits a *real* merge conflict (e.g. both sides edited `SESSION_LOG.md`), git will pause mid-rebase and tell you which file conflicts. Edit the file to resolve (look for `<<<<<<<` / `=======` / `>>>>>>>` markers), `git add <file>`, `git rebase --continue`. To bail and retry: `git rebase --abort`.
+
+#### Files to commit vs leave behind (per current `.gitignore`)
+
+**Committed (small, source-of-truth):**
+- `train/com/output/phase2_*/metrics.json` — headline numbers.
+- `train/com/output/phase2_*/*.png` — plots.
+- `train/com/output/phase2_*/*.pt` — model checkpoints (15k–500k params each; small).
+- `SESSION_LOG.md`, `train/com/*.py` — narrative + code.
+
+**Not committed (already in `.gitignore`):**
+- `train/com/output/com_results.p`, `smoke.p` — regenerable from `compute_com.py`.
+- `train/com/output/tactile_all.npy` — 1.2 GB tactile cache; regenerable.
+- `train/com/output/com_results*.csv` — derived from the pickles.
+- `train/ckpts/`, `train/singlePerson_test/` — dataset; re-download from Dropbox.
+
+---
+
+### Phase 2 tactile plot interpretation (2026-05-29)
+
+Three plots in `train/com/output/phase2_tactile/`. Headline reading:
+
+**`training_curve.png` — undertrained, no overfit.**
+Sharp drop MSE 1.0 → 0.3 by epoch 6, then slow monotonic descent to ~0.04 (train) / ~0.05 (val) by epoch 49. Train and val curves track within 0.005–0.01 throughout — no overfitting. Both still descending at the cutoff: **the model is undertrained, not over-capacity**. Directly motivates next-step (2): rerun at v2 parity (≥ 200 epochs).
+
+**`error_vs_horizon.png` — loses every horizon, shape diverges.**
+- h=0.1 s: persistence 16.8 vs tactile 18.2 (1.4 mm gap, expected — persistence IS the right answer at very short horizon).
+- h=1.0 s: persistence 85.7 vs tactile 114.6 (29 mm gap, large).
+- Persistence is concave (saturating near the natural CoM-displacement-over-1s); tactile is roughly linear. Signature: tactile has learned to "produce a plausible delta" and over-applies it when truth was "barely moved." v2 in contrast was concave like persistence and *under* it from h=3 onward.
+
+**`error_vs_horizon_z.png` — the most damning panel.**
+- Persistence z error stays near-flat 4.4 → 13.0 mm across horizons (z just doesn't move much in 1 s in this test set).
+- Tactile z error climbs 6.3 → 30.4 mm — 2.3× worse than persistence at h=1.0.
+- z is the axis where tactile's mechanism (GRF precedes vertical CoM) should give it an *edge*. Plot shows the opposite. Read: the 3-conv-layer + AdaptiveAvgPool(1) encoder collapses spatial structure into 128 scalars before sequence modeling, throwing away the "pressure-shifting-toward-heels" cue that would predict the upcoming z motion.
+- Reinforces next-step (2)'s recommendation that the **encoder is the lever**, not the GRU or the training duration alone. A heavier CNN frontend (or the frozen `tile2openpose_conv3d` encoder grafted in) is the cheapest meaningful upgrade.
+
+---
+
+### New tool: `compare_trajectories.py` — unified per-sample prediction plot (2026-05-29)
+
+User asked for an `example_trajectories.png`-style figure that overlays predictions from *all* trained models on the same test samples, so different methods can be read side-by-side instead of one PNG per script. Built as a standalone script rather than embedded in each training script — re-runnable any time without retraining.
+
+**File:** `train/com/compare_trajectories.py`.
+
+**Design choices captured here for future-me:**
+- **Standalone, not embedded.** Avoids re-running 200-epoch trainings just to update a plot. User-confirmed choice.
+- **Auto-discovery of checkpoints.** Tries to load Phase 1 GRU, Phase 2 v1 GRU, Phase 2 v2 GRU, Phase 2 tactile in turn. Each method that has its `.pt` file (and tactile cache, for tactile) is added to the plot; missing ones are skipped with a clear `SKIP (no checkpoint at ...)` message. User-confirmed choice.
+- **5 random test samples, SEED=42.** Matches `train_phase1.py`'s sampling so the same 5 samples appear in `phase1/example_trajectories.png` and `compare_trajectories/example_trajectories.png` — cross-figure comparison works. User-confirmed choice.
+- **Model classes inlined**, not imported from the training scripts. The training scripts (`train_phase1.py`, `train_phase2_*.py`) have no `if __name__ == '__main__':` guard, so `from train_phase1 import TrajForecaster` would trigger a full retraining run on import. Inline copies of the class definitions sidestep this. (Aside: this is a real latent bug — `train_phase2_keypoints_v2.py`'s `safe_load_phase1()` already triggers a phase1 retrain on every v2 run. Worth fixing later by adding `__main__` guards to all four training scripts. Not blocking.)
+- **Standardization stats reconstructed from train pool**, not loaded from disk. Each method's training script computes its own stats from the train split; the compare script reproduces them exactly by re-running the same numpy ops on the same train sample indices (same `build_indices()` logic, same SEED, same outlier filter). For tactile this includes reseeding `np.random.seed(SEED)` before the 1000-window subset sampling so the chosen subset matches the training-time subset bit-for-bit.
+
+**Sanity-check run on the laptop (CPU, 4 methods — tactile correctly skipped due to missing 1.2 GB cache):**
+- 17,218 total / 11,963 train / 5,255 test — matches every Phase 1/2 run.
+- Selected sample indices: `[4064, 2305, 3438, 468, 2275]` → frames `[25679, 17563, 25053, 3385, 17189]` → subjects `[YiyueLuo, TongZhang, YiyueLuo, MantianXue, TongZhang]`. These are the **canonical 5 samples** that will appear in every future `compare_trajectories` run (deterministic by SEED).
+- `train/com/output/compare_trajectories/example_trajectories.png` rendered cleanly.
+- `train/com/output/compare_trajectories/metadata.json` written with the sample-index → frame → subject map, so a future reviewer can correlate the figure back to the raw data.
+
+**To run on CRC** (after a `git pull` brings the new script over):
+```bash
+cd ~/IntelligentCarpet
+python train/com/compare_trajectories.py
+```
+- On CRC the tactile cache exists, so all 5 methods will plot (gray persistence, blue Phase 1, orange Phase 2 v1, red Phase 2 v2, green tactile).
+- ~30 s runtime — no training, just one forward pass per model on 5 samples.
+
+**Push these new artifacts to GitHub on the next sync:**
+- `train/com/compare_trajectories.py` (code).
+- `train/com/output/compare_trajectories/example_trajectories.png` (laptop or CRC version, whichever is newer).
+- `train/com/output/compare_trajectories/metadata.json`.
+
+---
+
+### `__main__` guards added to all four training scripts (2026-05-29)
+
+Motivation flagged earlier: `train_phase2_keypoints_v2.py`'s `safe_load_phase1()` does `from train_phase1 import TrajForecaster`, which under Python's import semantics runs `train_phase1.py`'s top-level code as a side effect. Since `train_phase1.py` had no `if __name__ == '__main__':` guard, that import silently triggered a full 50-epoch retrain of the Phase 1 GRU on every v2 run. The same trap existed for v2's import of `train_phase2_keypoints` and would have hit any future script that wanted to import a model class from one of the training scripts.
+
+**Refactor applied to:**
+- `train/com/train_phase1.py`
+- `train/com/train_phase2_keypoints.py`
+- `train/com/train_phase2_keypoints_v2.py`
+- `train/com/train_phase2_tactile.py`
+
+**Pattern (uniform across all four):**
+1. Module-level (importable without side effects):
+   - imports
+   - path constants (`_HERE`, `_TRAIN`, `_OUT`, `_PHASEn`)
+   - hyperparameter constants (`HISTORY`, `HORIZON`, `SEED`, etc.)
+   - pure helper functions (e.g. `persistence`, `linear_extrap`, `constant_velocity` in phase1)
+   - model class definitions (`TrajForecaster`, `DeltaForecaster`, `TactileEncoder`, `TactileForecaster`)
+   - in phase2_tactile: `extract_tactile_cache` function *definition* (the call moves into `main()`)
+2. Inside `def main():`:
+   - `os.makedirs(_PHASEn, exist_ok=True)` (so importing doesn't create directories)
+   - `np.random.seed(SEED)` + `torch.manual_seed(SEED)` (so importing doesn't perturb the importing module's RNG state)
+   - everything that loads data, builds samples, trains, evaluates, plots, saves
+   - nested `build_samples()` / `build_indices()` (use closure over data loaded in main)
+3. `if __name__ == '__main__': main()` at end-of-file.
+
+**Behavior preserved verbatim:**
+- Direct execution (`python train/com/train_phase1.py`) is bit-for-bit identical to before the refactor — same SEED, same order of `np.random` calls, same console output, same model weights, same plots.
+- The `safe_load_phase1` / `safe_load_phase2_v1` functions in v2 still work — but now `from train_phase1 import TrajForecaster` returns instantly with no training kicked off.
+
+**Verified on laptop (2026-05-29):**
+```
+Importing train_phase1...
+  TrajForecaster: <class 'train_phase1.TrajForecaster'>
+  HISTORY=100, HORIZON=10, SEED=42
+Importing train_phase2_keypoints...
+  TrajForecaster: <class 'train_phase2_keypoints.TrajForecaster'>
+Importing train_phase2_keypoints_v2...
+  DeltaForecaster: <class 'train_phase2_keypoints_v2.DeltaForecaster'>
+Importing train_phase2_tactile...
+  TactileForecaster: <class 'train_phase2_tactile.TactileForecaster'>
+  extract_tactile_cache (not called): <function extract_tactile_cache at 0x...>
+All 4 modules imported with NO training side-effect.
+```
+Each import returned in well under a second. No directories created, no model files written, no plots generated.
+
+**Practical effect on CRC:** next time `train_phase2_keypoints_v2.py` runs, it will skip the implicit Phase 2 v1 retrain (a few minutes saved) and skip the implicit Phase 1 retrain (another minute), and stdout will no longer interleave two-or-three training runs' worth of progress prints.
+
+**Bonus:** `compare_trajectories.py` could in principle now `from train_phase1 import TrajForecaster` instead of inlining the class definition. I left the inlined copies in place — the duplication is small and the decoupling is valuable (compare_trajectories doesn't break if a class signature changes in a training script). If you want me to switch it to use the imports, ~10-line change.
