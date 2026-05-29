@@ -1032,3 +1032,106 @@ Following https://docs.crc.nd.edu/new_user/quick_start.html. User is at NYU (jh9
 **Implication for Phase 5 (leave-one-subject-out):** with 10 subjects, this is now a real possibility from the demo set alone — no full raw-dataset download needed.
 
 **Structural clarification:** `log.p` has 136 entries; `fileNames.p` has 136 entries. They correspond 1:1, but there are actually **135 sessions** because the dataloader uses `log[f]` as the start of session `f` and `log[f+1]` as the end — the 136th log entry (32600) is just the end boundary of the last session. `sum(diff(log))` = 32600 = total frames, confirming.
+
+---
+
+## Session 4 — CRC operational + Phase 2 keypoints completed (2026-05-29)
+
+### CRC environment — fully provisioned
+
+Stages A–G of the CRC checklist (laid out 2026-05-28) all completed. Snapshot of the working setup:
+- Host: `crcfe01.crc.nd.edu` (front-end) → `qrsh -q gpu -l gpu_card=1 -pe smp 1` lands on a node like `qa-a10-023` / `qa-a10-033` (NVIDIA A10).
+- NetID: `jhao3` (note: distinct from the user's NYU `@nyu.edu` email, as expected).
+- Home: `/users/jhao3/` (AFS, 100 GB quota; currently ~25 GB used after extraction + outputs).
+- Conda env: `carpet` at `/users/jhao3/.conda/envs/carpet/`, Python 3.10.
+- PyTorch: `torch 2.5.1+cu121`, CUDA build 12.1. `cuda available` confirmed True on the GPU node.
+- Modules required after every `qrsh`: `conda activate carpet && module load cuda/12.1`.
+
+### Data transfer — one detour, now resolved
+
+User downloaded the *entire* shared Dropbox folder (`?dl=1` on the share link) instead of the demo files only, producing an 84 GB outer zip on AFS. We staged inner zips through `/tmp` (`/tmp/jhao3_extract/`) to avoid AFS quota overflow.
+
+The first extraction run was killed mid-Phase-3 (probably a front-end SSH disconnect, not the 1-hour process limit), leaving only ~50 of 135 sessions on disk and the `log.p` / `fileNames.p` metadata missing. The inner `singlePerson_test.zip` was *still* sitting in `/tmp` (persistent across logout), so we re-ran `python -m zipfile -e` directly and got the full dataset. Final state: `~/IntelligentCarpet/train/{ckpts,singlePerson_test}/` matches the laptop layout exactly.
+
+### Path bug fix during smoke test
+
+First GPU run hit `FileNotFoundError: '/users/jhao3/IntelligentCarpet/train/singlePerson_testlog.p'` (no separator). Cause: when I refactored `compute_com.py` to anchor paths to the script location, I changed the `--test_dir` default from `'./singlePerson_test/'` (trailing slash) to `os.path.join(_TRAIN, 'singlePerson_test')` (no trailing slash), but `threeD_dataLoader_batch.py:69` does string concatenation rather than `os.path.join`. Fixed by appending `os.sep` to the default in commit `8fab75c`.
+
+### Phase 0 (instantaneous CoM) reproduced on GPU — exact match
+
+| metric | Laptop CPU (2026-05-25) | CRC A10 GPU (2026-05-29) |
+|---|---:|---:|
+| x mean abs err (mm) | 45.5 | 45.5 |
+| y mean abs err (mm) | 44.0 | 44.0 |
+| z mean abs err (mm) | 53.9 | 53.9 |
+| 3D Euclidean mean (mm) | **98.4** | **98.4** |
+| GT CoM_z mean | −770 | −770 |
+| Pred CoM_z mean | −765 | −765 |
+| Carpet OOB x | 14 / 32600 | 14 / 32600 |
+| Carpet OOB y | 35 / 32600 | 35 / 32600 |
+
+**Wall time: 3 min 55 s on A10 vs 196 min on laptop CPU → ~50× speedup.** PyTorch + cu121 + A10 stack is healthy.
+
+### Phase 1 reproduced on GPU — exact match
+
+Re-ran `train/com/train_phase1.py` on the GPU. Median 3D errors all match the laptop CPU run byte-for-byte: persistence 54.1, linear 89.2, const_velocity 75.8, gru 61.1. Per-horizon table, per-axis breakdown, per-subject GRU stats — all identical. Run time about 1 minute on GPU.
+
+### Phase 2 (δ keypoints-only) — first result is honest but negative
+
+New script: `train/com/train_phase2_keypoints.py` (commit `8e2d01e`). Identical scaffold to Phase 1; only the GRU input dim changes from 3 (CoM) to 63 (21 keypoints × 3). Same per-session 70/30 chronological split, same outlier filter, same hyperparameters, same 17,218 / 5,255 train/test counts. Phase 1 GRU is auto-loaded and re-evaluated alongside for direct comparison.
+
+**Headline (1-s horizon):**
+| method | median 3D | mean 3D | p95 3D | skill |
+|---|---:|---:|---:|---:|
+| persistence | 54.1 | 92.2 | 327.2 | 1.000 |
+| Phase 1 GRU (CoM-only, input 3) | 61.1 | 88.8 | 261.3 | 1.128 |
+| **Phase 2 GRU (keypoints, input 63)** | **66.3** | 93.4 | 265.0 | **1.225** |
+
+**Per-axis (mm, averaged over horizons):**
+| axis | persistence | P1 GRU (CoM) | P2 GRU (kp) |
+|---|---:|---:|---:|
+| x | 21.2 | 25.8 | 31.3 ⬆ worse |
+| y | 19.7 | 24.7 | 29.4 ⬆ worse |
+| z | 9.4 | 20.1 | 20.5 same |
+
+**Interpretation — δ falsified at this architecture:**
+The extra 60 input dims (joint positions beyond CoM) **degrade x and y forecasting** without helping z. The 64-hidden GRU can't extract signal from the wider input and the inductive bias is gone (CoM is an aggregate summary that this small model can ride; raw keypoints just add noise it cannot denoise). The pose-history hypothesis fails for the cheap architecture.
+
+Per-subject medians: YiyueLuo 50.4 → 61.9 (worse), TongZhang 47.1 → 47.6 (same), TimErps 81.1 → 72.7 (better) — pattern is messy, no clean subject-level story.
+
+**What this rules out and what it does NOT rule out:**
+- **Does** falsify: "naive 64-hidden GRU on raw 63-dim pose history beats the 3-dim CoM equivalent."
+- **Does NOT** falsify: "a bigger or delta-parameterized pose-history model beats persistence."
+- **Does NOT** address: "tactile carries forecastable information beyond pose history." (That's the Phase 2 β question, still open.)
+
+### Infrastructure — git auth on CRC
+
+CRC ↔ GitHub HTTPS password auth fails (GitHub disabled it in 2021). User to set up an SSH key on CRC (`ssh-keygen -t ed25519`, copy public key to https://github.com/settings/keys, switch remote to `git@github.com:Jiayi459/IntelligentCarpet.git`). One-time setup; after that `git push origin main` from CRC just works. Alternative: GitHub Personal Access Token used as password.
+
+### Next move (proposed)
+
+The δ result didn't kill pose history outright — it killed the cheap version. Two questions to resolve next, in order:
+
+1. **Quick sanity: stronger pose-history floor (δ′)** — bigger GRU (hidden=256, layers=2), 200+ epochs, and try predicting deltas relative to `CoM(t)` rather than absolute positions. ~20 min on GPU. Establishes whether *any* history-only model can clear the persistence bar (54 mm at 1 s). If yes → tactile probably won't add much. If no → moves the burden of proof firmly onto tactile.
+
+2. **Main event: Phase 2 β (tactile-only)** — small CNN encoder over raw tactile windows → GRU → CoM future. The central scientific question: does tactile carry information that position-history (CoM or full pose) does not? Plan:
+   - Input: `tactile(t−N : t)` where each frame is (96, 96).
+   - Encoder: 2D CNN (a few conv layers + GAP) → ~128-dim per frame. Train from scratch initially; later try reusing the frozen `tile2openpose_conv3d` encoder.
+   - Sequence: GRU(hidden=128) over the encoded sequence → 3-dim CoM trajectory output.
+   - Same train/test split as Phase 1/2. Same metrics.
+   - Compute: feature extraction + training. ~30-60 min on A10.
+
+3. **If β works (beats persistence):** straight on to γ (fused tactile + CoM history) and then to Phase 5 (leave-one-subject-out cross-subject eval).
+4. **If β fails:** strong evidence the dataset is dominated by static recordings, persistence is unbeatable on aggregate, and we re-frame around high-motion subsets (which would be option 3 from the earlier ranked plan).
+
+**My recommendation: do (1) and (2) in parallel** — (1) is cheap and clarifies the history-only ceiling; (2) is the main event regardless. Awaiting user go-ahead.
+
+### Outputs to view (after `git pull` lands on laptop)
+
+Under `train/com/output/phase2_keypoints/`:
+- `metrics.json` — structured numbers for all three methods (persistence, Phase 1 GRU, Phase 2 GRU).
+- `training_curve.png` — Phase 2 GRU train/val MSE.
+- `error_vs_horizon.png` — 3D Euclidean error vs forecast horizon, all three methods overlaid.
+- `error_vs_horizon_z.png` — same restricted to the z axis.
+- `comparison_phase1_vs_phase2.png` — side-by-side bar chart of median error and skill score.
+- `gru_model.pt` — trained Phase 2 GRU weights.
