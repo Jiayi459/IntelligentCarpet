@@ -100,8 +100,9 @@ def main():
                         help='Directory containing ckpts/')
     parser.add_argument('--ckpt',        type=str, default='singlePerson_0.0001_10_best',
                         help='Checkpoint filename without .path.tar')
-    parser.add_argument('--test_dir',    type=str, default=os.path.join(_TRAIN, 'singlePerson_test'),
-                        help='Test data path')
+    parser.add_argument('--test_dir',    type=str,
+                        default=os.path.join(_TRAIN, 'singlePerson_test') + os.sep,
+                        help='Test data path (must end with separator — dataloader does string concat)')
     parser.add_argument('--window',      type=int, default=10)
     parser.add_argument('--batch_size',  type=int, default=32)
     parser.add_argument('--num_workers', type=int, default=4,
