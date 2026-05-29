@@ -15,6 +15,7 @@ train/singlePerson_test_diffTask/
 
 # Generated outputs (large; regenerable by re-running scripts)
 train/com/output/*.p
+train/com/output/*.npy
 train/com/output/com_results.csv
 train/com/output/com_results_with_subject.csv
 
