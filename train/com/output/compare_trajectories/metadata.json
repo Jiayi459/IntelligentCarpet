@@ -5,7 +5,8 @@
     "persistence",
     "phase1_gru_com",
     "phase2_v1_gru_kp",
-    "phase2_v2_gru_kp"
+    "phase2_v2_gru_kp",
+    "phase2_tactile"
   ],
   "sample_indices_in_test": [
     4064,
