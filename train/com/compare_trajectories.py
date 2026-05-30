@@ -330,32 +330,40 @@ if os.path.exists(p2v2_pt):
 else:
     print(f'phase2_v2_gru_kp:   SKIP   (no checkpoint at {p2v2_pt})')
 
-# 5. Phase 2 tactile
-p2t_pt_best = os.path.join(_OUT, 'phase2_tactile', 'tactile_model_best.pt')
-p2t_pt      = p2t_pt_best if os.path.exists(p2t_pt_best) else os.path.join(
-    _OUT, 'phase2_tactile', 'tactile_model.pt')
-tac_cache   = os.path.join(_OUT, 'tactile_all.npy')
-if os.path.exists(p2t_pt) and os.path.exists(tac_cache):
+# 5. Phase 2 tactile variants — try both the 50-epoch and 200-epoch runs.
+# Both use the same standardization stats (same SEED, same train pool, same RNG
+# replay), so we only build them once outside the loop.
+tac_cache = os.path.join(_OUT, 'tactile_all.npy')
+TACTILE_VARIANTS = [
+    ('phase2_tactile_50ep',  os.path.join(_OUT, 'phase2_tactile')),
+    ('phase2_tactile_200ep', os.path.join(_OUT, 'phase2_tactile_200ep')),
+]
+
+if not os.path.exists(tac_cache):
+    print(f'phase2_tactile_*:   SKIP all  (no tactile cache at {tac_cache} -- 1.2 GB, build with phase2_tactile.py)')
+else:
     tactile_all = np.load(tac_cache, mmap_mode='r')
     tac_mean, tac_std, mY, sY = stats_tactile(tactile_all)
-    m4 = TactileForecaster().to(device)
-    m4.load_state_dict(torch.load(p2t_pt, map_location=device, weights_only=False))
-    m4.eval()
-    windows = np.stack(
-        [(tactile_all[t - HISTORY + 1 : t + 1] - tac_mean) / tac_std
-         for t in sel_frame_centers],
-        axis=0
-    ).astype(np.float32)
-    with torch.no_grad():
-        x = torch.from_numpy(windows).to(device)
-        y = m4(x).cpu().numpy()
-    delta = y * sY + mY
-    predictions['phase2_tactile'] = delta + ref_now[:, None, :]
-    print(f'phase2_tactile:     ready  ({p2t_pt})')
-elif not os.path.exists(p2t_pt):
-    print(f'phase2_tactile:     SKIP   (no checkpoint at {p2t_pt})')
-else:
-    print(f'phase2_tactile:     SKIP   (no tactile cache at {tac_cache} -- 1.2 GB, build with phase2_tactile.py)')
+    for name, ddir in TACTILE_VARIANTS:
+        pt_best = os.path.join(ddir, 'tactile_model_best.pt')
+        pt      = pt_best if os.path.exists(pt_best) else os.path.join(ddir, 'tactile_model.pt')
+        if not os.path.exists(pt):
+            print(f'{name:<22}: SKIP   (no checkpoint at {pt})')
+            continue
+        m = TactileForecaster().to(device)
+        m.load_state_dict(torch.load(pt, map_location=device, weights_only=False))
+        m.eval()
+        windows = np.stack(
+            [(tactile_all[t - HISTORY + 1 : t + 1] - tac_mean) / tac_std
+             for t in sel_frame_centers],
+            axis=0
+        ).astype(np.float32)
+        with torch.no_grad():
+            x = torch.from_numpy(windows).to(device)
+            y = m(x).cpu().numpy()
+        delta = y * sY + mY
+        predictions[name] = delta + ref_now[:, None, :]
+        print(f'{name:<22}: ready  ({pt})')
 
 
 # ---------------------------------------------------------------------------
@@ -363,11 +371,12 @@ else:
 # ---------------------------------------------------------------------------
 
 method_styles = {
-    'persistence':      {'color': 'tab:gray',   'linestyle': '--', 'linewidth': 1.5, 'alpha': 0.9},
-    'phase1_gru_com':   {'color': 'tab:blue',   'linestyle': '--', 'linewidth': 1.2, 'alpha': 0.85},
-    'phase2_v1_gru_kp': {'color': 'tab:orange', 'linestyle': '--', 'linewidth': 1.2, 'alpha': 0.85},
-    'phase2_v2_gru_kp': {'color': 'tab:red',    'linestyle': '-',  'linewidth': 1.8, 'alpha': 0.95},
-    'phase2_tactile':   {'color': 'tab:green',  'linestyle': '-',  'linewidth': 1.5, 'alpha': 0.9},
+    'persistence':           {'color': 'tab:gray',   'linestyle': '--', 'linewidth': 1.5, 'alpha': 0.9},
+    'phase1_gru_com':        {'color': 'tab:blue',   'linestyle': '--', 'linewidth': 1.2, 'alpha': 0.85},
+    'phase2_v1_gru_kp':      {'color': 'tab:orange', 'linestyle': '--', 'linewidth': 1.2, 'alpha': 0.85},
+    'phase2_v2_gru_kp':      {'color': 'tab:red',    'linestyle': '-',  'linewidth': 1.8, 'alpha': 0.95},
+    'phase2_tactile_50ep':   {'color': 'tab:green',  'linestyle': '--', 'linewidth': 1.2, 'alpha': 0.75},
+    'phase2_tactile_200ep':  {'color': 'tab:olive',  'linestyle': '-',  'linewidth': 1.6, 'alpha': 0.95},
 }
 
 t_h = np.arange(-HISTORY + 1, 1)

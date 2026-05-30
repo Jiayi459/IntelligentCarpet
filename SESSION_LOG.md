@@ -1534,3 +1534,121 @@ qstat -u $USER                                    # monitor
 
 **4. Sync results back:**
 After each run finishes, `git add` the output dir, commit, push from CRC; `git pull` on laptop.
+
+---
+
+### Phase 2 ablation results — synergy, not single-change (2026-05-30)
+
+The three single-change variants ran in ~2 minutes total on the A10 (much faster than my hour estimate; the keypoint GRUs are tiny and the GPU is dedicated). Headline:
+
+| variant | config | median 3D (mm) | gap vs v1 | skill |
+|---|---|---:|---:|---:|
+| persistence | — | 54.1 | — | 1.000 |
+| **v1** (reference) | small / abs / 50ep | 66.3 | — | 1.225 |
+| **A1 delta_only** | small / **delta** / 50ep | **65.0** | **−1.3** | 1.201 |
+| **A2 bigger_only** | **big** / abs / 50ep | **67.5** | **+1.2 (worse)** | 1.247 |
+| **A3 longer_only** | small / abs / **200ep** | **68.8** | **+2.5 (worse)** | 1.272 |
+| **v2** (reference) | big / delta / 200ep + best-val | 46.8 | **−19.5** | 0.864 |
+
+**My pre-run prediction was wrong.** I'd written:
+> Most likely: A1 (delta_only) closes most of the gap — v1 was fighting an O(1000 mm) absolute regression with no anchor; delta framing removes that translation DoF. Prediction: A1 in [50–58] mm.
+
+Actual A1: 65.0 mm. Closed 7 % of the gap, not "most of it." A2 and A3 actively made things *worse* than v1.
+
+**The v2 win is a synergy result**, not attributable to any single one of the three changes. All three (delta target + bigger architecture + 200 ep with best-val) are co-required to beat persistence.
+
+**Probable mechanism** (would need more variants to confirm):
+- A2 (bigger, 50 ep, no best-val) overfits faster — end-of-training selection catches it past the optimum, so the bigger model performs *worse* than the small one at the same training duration.
+- A3 (small, 200 ep, no best-val) overfits late — same problem at a different scale.
+- A1 (delta target, 50 ep) needs more capacity OR more time to learn the new framing — the small GRU in 50 epochs can't exploit the better-conditioned loss.
+- v2 combines bigger capacity (room to fit) + delta target (better-conditioned loss) + 200 ep with best-val (lets the optimum surface and lets the protocol *select* it).
+
+**Caveat baked into the design:** the three single-change variants use **end-of-training** model selection (matching v1's protocol). v2 uses **best-val**. So "best-val checkpointing" is effectively a 4th change bundled into v2 that the ablation doesn't isolate. A cleaner finale would be a 4th variant (`A4 = small + abs + 200ep + best-val`) to settle whether best-val alone explains the gap that A3 leaves open. Cheap to add (5 min on A10) — not blocking, but worth doing for the writeup.
+
+**Critical implication for tactile / Phase 2 onward:** there is no cheap recipe transfer from keypoints to tactile. We cannot just "use delta target on tactile and call it done" — that's A1's variant and it gets only 7 % of the gain. To beat persistence with tactile, we likely need the tactile analog of *all* of v2's changes (delta + bigger model + longer + best-val), AND probably a heavier encoder (the 3-conv + AdaptiveAvgPool(1) frontend is the main suspect for tactile's remaining gap; see next subsection).
+
+---
+
+### Phase 2 tactile @ parity (200 ep best-val) — modest improvement, still loses (2026-05-30)
+
+Recovered from an SSH/wall-time disconnect at epoch ~151 by writing `eval_phase2_tactile.py`, which reloads `tactile_model_best.pt` (saved at epoch 148, val_MSE=0.03256) and runs only the eval+output phase. Standardization stats reproduced via deterministic RNG replay — match training-time values bit-for-bit, so predictions are what the training script would have produced if it had reached its eval phase.
+
+| metric | tactile 50ep | tactile 200ep | persistence |
+|---|---:|---:|---:|
+| median 3D | 63.7 | **58.1** | 54.1 |
+| mean 3D | 99.8 | 94.2 | 92.2 |
+| p95 3D | 328.0 | 310.5 | 327.2 |
+| skill | 1.176 | **1.073** | 1.000 |
+| x median (avg over horizons) | 27.1 | 27.2 | 21.2 |
+| y median | 25.9 | 23.5 | 19.7 |
+| z median | **18.2** | **14.3** | **9.4** |
+
+**What 4× more training bought:**
+- Closed **58 %** of the median-3D gap-to-persistence (gap was 9.6 mm at 50ep, now 4.0 mm).
+- **z error dropped 21 %** (18.2 → 14.3 mm). z is the axis where the tactile mechanism (ground-reaction-force precedes vertical CoM motion) *should* matter most, and it's the axis that gained most. Encouraging directional signal.
+- p95 dropped 5 % (328 → 310). Tail behavior improved alongside the median.
+- y improved 9 %; x essentially unchanged. The encoder isn't picking up signal that helps with horizontal drift prediction — x continues to be hard for tactile.
+- Per-horizon: error grows roughly linearly with horizon (vs persistence's concave shape). Same "predicts motion that doesn't materialize" signature as the 50-ep run, just less pronounced.
+- Per-subject rank order unchanged (TongZhang best at 39.5 mm; YunzhuLi worst at 69.7).
+
+**Train/val curve at termination (from the partial run):**
+- epoch 0:   train ≈ 1.00, val ≈ 1.00 (initialized to mean)
+- epoch 49:  train ≈ 0.04, val ≈ 0.05 (50-ep result; train and val tracked tightly)
+- epoch 148: train ≈ 0.015, val ≈ 0.033 (best-val saved here)
+- epoch 151: train ≈ 0.015, val ≈ 0.034 (last printed; ~2× gap = overfitting onset)
+
+Train-val gap widened from ~0.01 (50ep) to ~0.018 (200ep) — clear sign that 200ep is in the diminishing-returns regime. Best-val checkpoint correctly picks epoch 148; further training would have overfit more without improving val. So **200ep is roughly the right training duration for this architecture; the bottleneck is architecture, not training time**.
+
+**Bottom line for tactile:** the 50→200 ep improvement is real but doesn't close the gap. The encoder (3-conv + AdaptiveAvgPool(1) → 128 scalars) collapses too much spatial structure. v2-on-keypoints achieves 46.8 mm with rich pose input; tactile-only at 58.1 mm is 11 mm above v2 — that's the "encoder quality" deficit. The next architectural lever for tactile is either (a) graft the frozen `tile2openpose_conv3d` frontend in, or (b) keep the small CNN but add capacity + go bigger on the sequence model.
+
+---
+
+### Joint synthesis + revised next-step (2026-05-30)
+
+What the two results tell us **together**:
+
+1. **No cheap recipe transfer from keypoints to tactile.** The keypoint-side ablation rules out the optimistic "just adopt delta target on tactile" path — that's A1, which closed only 7 % of the gain. For tactile to reach v2-grade performance via the same recipe, it needs *all* of: delta target (✓ already), 200 ep + best-val (✓ already), bigger sequence model (not yet), heavier encoder (not yet).
+2. **Tactile-only is no longer flat-lining.** 50→200 ep gave a real 8.8 % drop in median 3D and a 21 % drop in z error. The model is *learning something useful*, just not enough to beat persistence yet. The z-axis trajectory is the most encouraging single signal in the entire project so far — tactile predicts vertical CoM motion better than the prior 50-ep number suggested it could.
+3. **The central scientific question is still open.** Whether tactile adds information beyond camera pose history requires γ fusion to test directly. Tactile-only beating or losing to persistence is one piece of evidence; γ-vs-v2 is the decisive piece.
+
+**Revised next-step ranking (replaces the prior ranking in [SESSION_LOG.md] under "Ranked next-step plan (2026-05-29...)"):**
+
+| # | Step | Why this rank now | Effort | GPU? |
+|---|---|---|---:|:-:|
+| 1 | **γ fusion** (tactile + CoM history → CoM future) | The central project question, and the only experiment that can directly answer "does tactile add information beyond pose history?". Result determines whether tactile is worth scaling up. | 1 day to code + 1 overnight run | ✅ |
+| 2 | **Tactile-v2-protocol** (bigger sequence model: hidden 256, 2 layers, + everything 200ep tactile already has) | Tests whether the keypoint-side synergy transfers to tactile. Critical falsification: if even this can't beat persistence, the encoder is the only remaining lever, and γ becomes the only path. | overnight | ✅ |
+| 3 | **A4 best-val ablation** (small + abs + 200ep + best-val) | Resolves the design caveat from this ablation — disambiguates "longer training" from "best-val checkpointing" as the v1→v2 ingredient. Improves the writeup. Not on the critical path. | ~5 min | ✅ |
+| 4 | **Heavy-encoder tactile** (frozen `tile2openpose_conv3d` frontend) | Pursue only if (2) shows the bigger sequence model alone doesn't help — confirms the encoder is the bottleneck. | half-day | ✅ |
+| 5 | **Deployment-realistic v2** (kp_pred_mm input to v2) | Quantifies how much CNN-pose noise hurts forecasting. Useful for the writeup; not on the critical path. | ~2 h | ✅ |
+| 6 | **High-motion subset re-eval** | Re-evaluates all methods on frames where ‖CoM velocity‖ > threshold. Persistence's dominance shrinks on these frames; the tactile / γ story would look better there. | <1 h | ❌ |
+| 7 | **Cross-subject LOSO** (Q5 ultimate goal) | Premature until a method actually beats persistence on the easier in-subject split. | 2–3 days | ✅ |
+| 8 | **Phase 3 JEPA / Dreamer** | Only justified if γ shows tactile adds real value. | weeks | ✅ heavy |
+
+**My strong recommendation: do (1) γ fusion next.** It's the only experiment that *can answer the central project question* with a binary yes/no. Everything else is either:
+- bake-off plumbing that produces a number but doesn't change project direction (2, 3, 5), or
+- gated on what γ tells us (4, 6, 7, 8).
+
+If γ beats v2's 46.8 mm by a clear margin → tactile adds value → scale up (4 then 7 then maybe 8).
+If γ ties v2 within noise → tactile doesn't add information beyond camera pose → write up honest result + pivot.
+If γ loses to v2 → bug or training-time issue → debug.
+
+---
+
+### `compare_trajectories.py` updated to handle both tactile variants (2026-05-30)
+
+User requested that the comparison plot include the new 200-ep tactile run. Edit applied: the tactile loading block now iterates over a list of candidate directories instead of hardcoding `phase2_tactile/`. It tries both:
+- `output/phase2_tactile/` → plotted as `phase2_tactile_50ep`
+- `output/phase2_tactile_200ep/` → plotted as `phase2_tactile_200ep`
+
+Both checkpoints share the same standardization stats (same SEED, same train pool, same RNG replay), so we build them once and reuse for each variant — cheap. New method styles added (`tab:green` dashed for 50ep, `tab:olive` solid for 200ep).
+
+**Verified on laptop:** import test passes; 4 non-tactile methods plot; both tactile variants gracefully skip together with a single message (the cache is the gating dependency, missing locally as expected). On CRC the cache exists so both will plot — **6 methods on the figure now**.
+
+**How to run on CRC:**
+```bash
+cd ~/IntelligentCarpet
+git status                                # clean
+git pull --rebase origin main             # brings the updated script
+python train/com/compare_trajectories.py  # ~30 s, no flags needed
+```
+Output replaces `train/com/output/compare_trajectories/example_trajectories.png` and `metadata.json`.
