@@ -1422,3 +1422,115 @@ Each import returned in well under a second. No directories created, no model fi
 **Practical effect on CRC:** next time `train_phase2_keypoints_v2.py` runs, it will skip the implicit Phase 2 v1 retrain (a few minutes saved) and skip the implicit Phase 1 retrain (another minute), and stdout will no longer interleave two-or-three training runs' worth of progress prints.
 
 **Bonus:** `compare_trajectories.py` could in principle now `from train_phase1 import TrajForecaster` instead of inlining the class definition. I left the inlined copies in place — the duplication is small and the decoupling is valuable (compare_trajectories doesn't break if a class signature changes in a training script). If you want me to switch it to use the imports, ~10-line change.
+
+---
+
+### Phase 2 ablation + tactile-at-parity scripts (2026-05-30)
+
+User approved the 3-variant ablation + epochs-only tactile-at-parity plan from the ranked next-step list. Two new pieces of code:
+
+#### 1. `train/com/train_phase2_ablation.py` — three-variant attribution
+
+The v2 jump (66.3 → 46.8 mm median, 13.6 % skill improvement over persistence) bundles three simultaneous changes vs v1. This script trains three variants, each isolating exactly ONE of those changes on top of v1:
+
+| variant | target | hidden / layers / dropout | epochs |
+|---|---|---|---:|
+| v1 (reference, not retrained) | abs   | 64 / 1 / 0.0 | 50 |
+| **A1 delta_only**             | delta | 64 / 1 / 0.0 | 50 |
+| **A2 bigger_only**            | abs   | 256 / 2 / 0.1 | 50 |
+| **A3 longer_only**            | abs   | 64 / 1 / 0.0 | 200 |
+| v2 (reference, not retrained) | delta | 256 / 2 / 0.1 | 200 (best-val) |
+
+Each variant re-seeds (`np.random.seed(SEED); torch.manual_seed(SEED)`) before training so all three start from the same RNG state — only the config change matters.
+
+**Protocol choice:** all three variants use the **end-of-training model**, NOT best-val. v1 didn't use best-val, so matching v1's protocol exactly isolates the single change cleanly. If A3 overfits at late epochs and underperforms, that's a finding ("longer training without checkpointing hurts"), not a protocol artifact.
+
+**Outputs** under `train/com/output/phase2_ablation/`:
+- `A1_delta_only/{gru_model.pt, metrics.json, training_curve.png}`
+- `A2_bigger_only/{...}`
+- `A3_longer_only/{...}`
+- `ablation_summary.png` — bar chart of median 3D + skill score for `persistence | v1 | A1 | A2 | A3 | v2`. Loads v1/v2 reference numbers from existing `phase2_keypoints/metrics.json` and `phase2_keypoints_v2/metrics.json`.
+- `ablation_error_vs_horizon.png` — per-horizon comparison line plot.
+- `ablation_metrics.json` — combined structured dump.
+
+**Expected interpretation outcomes (my prior, recorded so it can be checked against the result):**
+- Most likely: **A1 (delta_only) closes most of the gap** — v1 was fighting an O(1000 mm) absolute regression with no anchor; delta framing removes that translation DoF. Prediction: A1 lands in [50–58] mm median range.
+- Second most likely: **A2 (bigger_only) makes a moderate dent** — 256-hidden has the capacity to fit, but without delta framing it still wastes capacity on the translation problem. Prediction: A2 in [60–66] mm range, only marginally better than v1.
+- Least likely to help on its own: **A3 (longer_only)** — without delta framing or capacity headroom, more epochs mostly overfits. Prediction: A3 either similar to v1 or slightly worse.
+
+If A1 alone gets close to v2's 46.8 → tactile-at-parity should also use delta target (it already does) AND we know we don't need the big GRU. Recipe transfers cleanly.
+If A2 alone wins → architecture, not target framing, is the lever. Tactile needs the bigger sequence model too.
+If A3 alone wins → just train tactile much longer.
+If only A1+A2+A3 together win → all three are co-required (synergy).
+
+#### 2. `train/com/train_phase2_tactile.py` — added `--epochs` and `--output-dir` CLI
+
+So the parity rerun doesn't clobber the existing 50-epoch results. Backward-compatible: default `--epochs 50` and default `--output-dir train/com/output/phase2_tactile/` reproduce the prior behavior verbatim. New invocation for the parity test:
+```bash
+python train/com/train_phase2_tactile.py --epochs 200 \
+    --output-dir train/com/output/phase2_tactile_200ep
+```
+
+**Sanity-tested on laptop (2026-05-30):**
+- `import train_phase2_ablation` returns instantly with no training triggered. `AblationForecaster` and `VARIANTS` accessible.
+- `import train_phase2_tactile` (with the CLI additions) imports cleanly with no side-effects.
+- `python train/com/train_phase2_tactile.py --help` prints the new flags correctly.
+
+#### Launch plan for CRC
+
+Two runs to do. Ablation is the short interactive one; tactile-at-parity is the overnight one.
+
+**1. Pull the new scripts (on CRC):**
+```bash
+cd ~/IntelligentCarpet
+git status                                        # confirm clean
+git pull --rebase origin main                     # brings both new scripts
+ls train/com/train_phase2_ablation.py             # sanity
+```
+
+**2. Interactive ablation run (~1 h on A10):**
+```bash
+qrsh -q gpu -l gpu_card=1 -pe smp 4 -l h_rt=04:00:00    # if not already on a GPU node
+module load conda && module load cuda/12.1
+conda activate carpet
+cd ~/IntelligentCarpet
+python -u train/com/train_phase2_ablation.py 2>&1 | tee train/com/output/phase2_ablation/run.log
+```
+The `-u` flag disables Python's stdout buffering so `tee` sees lines live (avoids the "no output until process ends" gotcha from earlier sessions).
+
+**3. Tactile-at-parity run (~3–6 h on A10):**
+
+Option A — same interactive session if it has enough wall-time left (check with `echo $h_rt` or `qstat -j $JOB_ID`):
+```bash
+python -u train/com/train_phase2_tactile.py --epochs 200 \
+    --output-dir train/com/output/phase2_tactile_200ep \
+    2>&1 | tee train/com/output/phase2_tactile_200ep/run.log
+```
+
+Option B — as a batch job (preferred for the long run; survives shell disconnect):
+```bash
+# Create a batch script: train/com/qsub_tactile_200ep.sh
+cat > train/com/qsub_tactile_200ep.sh <<'EOF'
+#!/bin/bash
+#$ -q gpu
+#$ -l gpu_card=1
+#$ -pe smp 4
+#$ -l h_rt=08:00:00
+#$ -N tactile_200ep
+#$ -o train/com/output/phase2_tactile_200ep/qsub.out
+#$ -e train/com/output/phase2_tactile_200ep/qsub.err
+
+module load conda
+module load cuda/12.1
+conda activate carpet
+cd ~/IntelligentCarpet
+mkdir -p train/com/output/phase2_tactile_200ep
+python -u train/com/train_phase2_tactile.py --epochs 200 \
+    --output-dir train/com/output/phase2_tactile_200ep
+EOF
+qsub train/com/qsub_tactile_200ep.sh
+qstat -u $USER                                    # monitor
+```
+
+**4. Sync results back:**
+After each run finishes, `git add` the output dir, commit, push from CRC; `git pull` on laptop.

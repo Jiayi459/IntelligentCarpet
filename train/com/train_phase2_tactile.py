@@ -35,6 +35,7 @@ import json
 import pickle
 import re
 import time
+import argparse
 
 import numpy as np
 import torch
@@ -153,7 +154,20 @@ class TactileForecaster(nn.Module):
 # ---------------------------------------------------------------------------
 
 def main():
-    os.makedirs(_TACTILE, exist_ok=True)
+    parser = argparse.ArgumentParser(description='Phase 2 tactile-only CoM forecaster')
+    parser.add_argument('--epochs', type=int, default=EPOCHS,
+                        help=f'training epochs (default {EPOCHS})')
+    parser.add_argument('--output-dir', type=str, default=_TACTILE,
+                        help=f'where to save model + metrics + plots '
+                             f'(default {_TACTILE}). Set to a new dir to avoid '
+                             f'overwriting a prior run.')
+    args = parser.parse_args()
+    epochs     = args.epochs
+    output_dir = args.output_dir
+    print(f'epochs     : {epochs}')
+    print(f'output_dir : {output_dir}')
+
+    os.makedirs(output_dir, exist_ok=True)
     np.random.seed(SEED)
     torch.manual_seed(SEED)
 
@@ -281,11 +295,11 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     criterion = nn.MSELoss()
     n_params  = sum(p.numel() for p in model.parameters())
-    print(f'\nTraining tactile forecaster ({n_params} params, {EPOCHS} epochs)...')
+    print(f'\nTraining tactile forecaster ({n_params} params, {epochs} epochs)...')
 
     train_losses, val_losses = [], []
     best_val = float('inf')
-    for epoch in range(EPOCHS):
+    for epoch in range(epochs):
         model.train()
         total = 0.0
         n_b = 0
@@ -314,16 +328,16 @@ def main():
         val_losses.append(avg_val)
         if avg_val < best_val:
             best_val = avg_val
-            torch.save(model.state_dict(), os.path.join(_TACTILE, 'tactile_model_best.pt'))
+            torch.save(model.state_dict(), os.path.join(output_dir, 'tactile_model_best.pt'))
 
-        print(f'  epoch {epoch:3d}/{EPOCHS - 1}  '
+        print(f'  epoch {epoch:3d}/{epochs - 1}  '
               f'train={avg_train:.5f}  val={avg_val:.5f}  best_val={best_val:.5f}  '
               f'({time.time() - epoch_start:.1f}s)', flush=True)
 
     # Reload best
-    model.load_state_dict(torch.load(os.path.join(_TACTILE, 'tactile_model_best.pt'),
+    model.load_state_dict(torch.load(os.path.join(output_dir, 'tactile_model_best.pt'),
                                      map_location=device, weights_only=False))
-    torch.save(model.state_dict(), os.path.join(_TACTILE, 'tactile_model.pt'))
+    torch.save(model.state_dict(), os.path.join(output_dir, 'tactile_model.pt'))
 
     # Evaluate
     print('\nEvaluating on the test set...')
@@ -374,7 +388,7 @@ def main():
         }
     results['phase2_tactile']['per_subject_median_mm'] = per_subject
 
-    with open(os.path.join(_TACTILE, 'metrics.json'), 'w') as f:
+    with open(os.path.join(output_dir, 'metrics.json'), 'w') as f:
         json.dump(results, f, indent=2)
 
     # Console summary
@@ -413,7 +427,7 @@ def main():
     ax.set(xlabel='epoch', ylabel='MSE on standardized delta',
            title=f'Phase 2 tactile-only — encoder + GRU({GRU_HIDDEN})')
     ax.legend(); ax.grid(alpha=0.3)
-    plt.tight_layout(); plt.savefig(os.path.join(_TACTILE, 'training_curve.png'), dpi=100); plt.close()
+    plt.tight_layout(); plt.savefig(os.path.join(output_dir, 'training_curve.png'), dpi=100); plt.close()
 
     fig, ax = plt.subplots(figsize=(8, 5))
     hs = np.arange(1, HORIZON + 1) / 10.0
@@ -423,7 +437,7 @@ def main():
            ylabel='median 3D Euclidean error (mm)',
            title='Phase 2 (tactile) — error vs horizon')
     ax.legend(); ax.grid(alpha=0.3)
-    plt.tight_layout(); plt.savefig(os.path.join(_TACTILE, 'error_vs_horizon.png'), dpi=100); plt.close()
+    plt.tight_layout(); plt.savefig(os.path.join(output_dir, 'error_vs_horizon.png'), dpi=100); plt.close()
 
     fig, ax = plt.subplots(figsize=(8, 5))
     for name in ordered:
@@ -433,9 +447,9 @@ def main():
            ylabel='median |z| error (mm)',
            title='Phase 2 (tactile) — z-axis error vs horizon')
     ax.legend(); ax.grid(alpha=0.3)
-    plt.tight_layout(); plt.savefig(os.path.join(_TACTILE, 'error_vs_horizon_z.png'), dpi=100); plt.close()
+    plt.tight_layout(); plt.savefig(os.path.join(output_dir, 'error_vs_horizon_z.png'), dpi=100); plt.close()
 
-    print(f'\nSaved metrics + plots to {_TACTILE}')
+    print(f'\nSaved metrics + plots to {output_dir}')
 
 
 if __name__ == '__main__':
