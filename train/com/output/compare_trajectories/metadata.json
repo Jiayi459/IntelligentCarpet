@@ -6,7 +6,8 @@
     "phase1_gru_com",
     "phase2_v1_gru_kp",
     "phase2_v2_gru_kp",
-    "phase2_tactile"
+    "phase2_tactile_50ep",
+    "phase2_tactile_200ep"
   ],
   "sample_indices_in_test": [
     4064,
