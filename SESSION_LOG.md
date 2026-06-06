@@ -1652,3 +1652,97 @@ git pull --rebase origin main             # brings the updated script
 python train/com/compare_trajectories.py  # ~30 s, no flags needed
 ```
 Output replaces `train/com/output/compare_trajectories/example_trajectories.png` and `metadata.json`.
+
+---
+
+### Research-direction review + revised plan (2026-05-30, after ablation)
+
+After the ablation falsified my "delta target alone closes the gap" hypothesis (the v1→v2 win is a synergy of all three changes), we paused before more training runs to ask a more fundamental question: *are we predicting the right target with the right pretraining recipe?* User asked for a literature-grounded review of four options:
+
+A. Learn representations OTHER than CoM (e.g., CoP, pose, GRF).
+B. Pretrain something BEFORE the supervised forecasting task (self-supervised on tactile).
+C. Change how CoM itself is computed (cleaner ground truth).
+D. Stick with CoM and just try more training experiments (γ fusion, encoder swaps, etc.).
+
+#### Literature findings (informed the directions below)
+
+Two distinct converging signals from recent ML + biomechanics papers:
+
+**(i) Tactile/pressure-sensing research has converged on Center of Pressure (CoP), not Center of Mass, as the natural target.**
+- A 2026 Sensors paper does "Tactile Sensor → Body CoP" with CNN/ResNet + Bi-LSTM (very close architectural match to our setup), predicting CoP rather than CoM. Their argument: force plates are gold standard for CoP, pressure sensors are the cheap alternative, **CoP is the biomechanically primary quantity for balance and fall risk** — CoM only enters via the inverted-pendulum model.
+- The Extrapolated CoM (XCoM) framework in clinical balance research treats CoM and CoP *jointly*: a person stays balanced iff CoP can be placed where the XCoM is. Multiple papers use ANNs to predict the CoM–CoP distance specifically.
+- **For our project:** tactile *literally is* CoP's input. Tactile is a 96×96 pressure map → CoP is its centroid + height → trivial closed-form computation. CoM, by contrast, requires the camera-OpenPose chain (71 mm noise floor of its own). Predicting tactile→CoP is a chain with one link, not three.
+
+**(ii) Self-supervised pretraining on tactile is the dominant 2024-2025 recipe.**
+- Sparsh (Meta AI, late 2024): tactile encoders pretrained on 460k+ tactile frames with masked image modeling + self-distillation. Reports **95.1 %** average improvement over end-to-end task-specific training.
+- Contrastive Touch-to-Touch Pretraining (CTTP), Transferable Tactile Transformers (T3): similar findings.
+- **For our project:** the v2 ablation said the tactile encoder is the bottleneck — exactly the symptom SSL pretraining is designed to fix. We have 32,802 unlabeled tactile frames in `tactile_all.npy`; pretrain a small encoder with masked tactile modeling, fine-tune for forecasting.
+
+Insole/wearable-pressure GRF prediction literature (LSTM, TCN, Transformer; 4.2 % RMSE on vertical GRF during running) is also rich, but operates on plantar pressure inside a shoe rather than full-body floor mat. Marginally relevant; not pursued as a separate direction.
+
+#### Three substantive directions
+
+**Direction A — Pivot the target: tactile → CoP (and/or CoM–CoP distance)**
+- *For:* CoP is the sensor-aligned target. Cleaner causal chain. Biomechanically primary for balance/fall research. Persistence on CoP will be a *much* weaker baseline than persistence on CoM, because CoP genuinely sways frame-to-frame during quiet standing (CoP IS the sway signal) while CoM is the slow average — so tactile forecasters have natural headroom.
+- *Against:* Changes the project's framing slightly. But CoP can be *added* as a target rather than replace CoM.
+- *Cost to test cheaply:* ~30 min. Compute CoP from `tactile_all.npy`, compute persistence-on-CoP at 1-s horizon, compare to persistence-on-CoM (54 mm). If persistence-on-CoP is ≫54 mm, there is room for tactile to add value on this target.
+
+**Direction B — Self-supervised tactile pretraining, then fine-tune**
+- *For:* Directly addresses the v2-ablation finding ("encoder is the bottleneck"). Recipe is well-validated in 2024-2025 literature with ~95 % gains reported. We have the unlabeled data (32k frames) for free.
+- *Against:* Larger investment (~1 day to code + 1–2 nights GPU). Pure encoder improvement; doesn't help if the underlying tactile-helps-target hypothesis is wrong.
+- *Cost to test:* ~1 day code + overnight train.
+
+**Direction C — Stay on CoM but predict full pose trajectory (21 joints × 3 × 10 horizons = 630 dims per sample)**
+- *For:* Denser supervision signal. CoM falls out as a derived quantity. Per-joint forecasts are useful in their own right (gait, ergonomics).
+- *Against:* Harder optimization (higher-dim output, more failure modes). Existing comparison numbers (persistence, v2, tactile) would have to be recomputed on the new target — slows the writeup.
+- *Cost to test:* ~1 day. Change output head from 30 to 630 dims; reuse v2 backbone.
+
+#### Recommended priority order (user-approved 2026-05-30)
+
+1. **Direction A's cheap test first — ~30 min.** Compute CoP from cached tactile frames; compute persistence-on-CoP at all horizons; compare absolute mm and skill-vs-CoM. **Decisive split:** if persistence-on-CoP is, say, 100+ mm at 1 s while persistence-on-CoM is 54, CoP is the better forecasting target for tactile (low absolute bar + sensor-aligned causation). If persistence-on-CoP is also <30 mm, CoP is too slow-changing to matter and we stay on CoM.
+2. **γ fusion** (still the binary "does tactile add info beyond pose history" test), run on whichever target step 1 picks.
+3. **Self-supervised tactile pretraining (B)** OR **full-pose forecasting (C)** — pick based on what γ tells us about the bottleneck.
+4. **XCoM-related target** (`CoM − CoP`): predict the *lean signal* directly. This is by construction "what tactile uniquely contributes after the camera geometry is accounted for." File for later; appears in the literature as the most clinically actionable target for fall-risk research.
+
+The intellectually honest framing for the writeup: **the original IntelligentCarpet "tactile → camera-derived CoM" framing asks tactile to predict a non-sensor-aligned target through a noisy chain.** Aligning the target with the sensor (tactile → CoP) and pretraining the encoder on its native modality (SSL on raw tactile) are the two interventions the 2024-2026 literature converges on. Both are testable with the data we already have.
+
+#### Concrete next experiment (proposed — awaiting user approval before coding)
+
+**Script:** `train/com/compute_cop.py` (new). Mirrors the structure of `compute_com.py`.
+
+**What it does:**
+1. Loads `tactile_all.npy` (32,802 × 96 × 96 normalized pressure frames).
+2. For each frame, computes 2-D CoP as the pressure-weighted centroid of the carpet:
+   ```python
+   p = tactile_frame                                  # (96, 96), non-negative
+   total = p.sum()
+   if total < 1e-6:                                   # no contact — emit NaN
+       cop = (nan, nan)
+   else:
+       xs = np.arange(96)
+       cop_x = (p.sum(axis=0) * xs).sum() / total
+       cop_y = (p * xs[:, None]).sum() / total        # similar for y
+   # Map (cop_x, cop_y) from grid coordinates to mm using the same carpet
+   # extent (-100, 1800) as compute_com.py for direct comparability.
+   ```
+3. (Optional, not in first pass) Use sum of pressure as a proxy for vertical force (GRF_z). This is unit-less without calibration but useful as a *relative* signal — `cop_z_proxy = log(total_pressure)` or just `total_pressure`, normalized.
+4. Saves `train/com/output/cop_results.p` with keys: `cop` (T, 2) mm; `total_pressure` (T,); maybe `valid_mask` (T,) marking frames where contact existed.
+5. Prints sanity stats: CoP-x range, CoP-y range, frame-to-frame jump distribution, frames with no detectable contact.
+
+**Then immediately:** a tiny analysis pass (could live in the same script under a `--persistence-only` flag) that:
+1. Uses the same 17,218 / 5,255 sample split logic as the CoM forecasters.
+2. Computes persistence-on-CoP at horizons 1–10 frames (0.1 s to 1.0 s).
+3. Reports median / mean / p95 per horizon vs persistence-on-CoM for context.
+
+**Expected outcome to confirm or refute:** my prior is persistence-on-CoP at 1-s horizon will be in the 100–250 mm range (carpet is roughly 1.9 m on a side, sway is at ~10–50 mm/s during standing, transitions move CoP much further). Persistence-on-CoM at 1 s was 54 mm. If CoP genuinely sways at 5× the CoM displacement rate, the persistence bar is 5× higher in absolute terms — that's the headroom we need.
+
+**Cost:** ~30 minutes coding + a few seconds compute. CPU-only on CRC front-end is fine.
+
+**Decision after this experiment:**
+- *Persistence-on-CoP ≫ persistence-on-CoM* → pivot. Write `train_phase2_cop.py` (tactile → 1-s CoP forecast), train, compare. Then γ fusion *on CoP*.
+- *Persistence-on-CoP ≈ persistence-on-CoM* → no headroom advantage; stay on CoM, proceed with γ fusion on CoM as originally planned.
+- *Persistence-on-CoP ≪ persistence-on-CoM (unexpected)* → CoP is too slow to forecast usefully on this dataset (mostly-static people); investigate why.
+
+#### Status
+
+Plan logged for user review. **No code written yet.** Awaiting user approval to implement `compute_cop.py`. If approved, the entire experiment lands in one short session (single file, single run, results in the log).
