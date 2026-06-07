@@ -1746,3 +1746,79 @@ The intellectually honest framing for the writeup: **the original IntelligentCar
 #### Status
 
 Plan logged for user review. **No code written yet.** Awaiting user approval to implement `compute_cop.py`. If approved, the entire experiment lands in one short session (single file, single run, results in the log).
+
+---
+
+### CoP persistence result — Direction A killed; structural finding about the data (2026-06-06)
+
+User approved `compute_cop.py`; it ran on CRC, result is decisive and contrary to my prior.
+
+**Headline (median Euclidean error vs horizon, mm, on the standard 5,255 test samples):**
+
+| horizon | CoP 2-D | CoM xy 2-D | CoM 3-D |
+|---:|---:|---:|---:|
+| 0.1 s | ~2.5 | ~13 | ~17 |
+| 0.5 s | ~2.0 | ~48 | ~64 |
+| **1.0 s** | **~2.5** | **~65** | **~86** |
+
+**CoP persistence is essentially flat across all horizons at ~2-3 mm.** The CoP one second from now is statistically the same point as the CoP now. Per-axis: both `cop_x` and `cop_y` pinned at 1-2 mm regardless of horizon.
+
+**My prior was wrong.** I predicted CoP persistence at 1 s would land in 80-200 mm range based on the biomechanics literature's "10-50 mm/s of quiet-stance sway." Actual is 2.5 mm. The CoP centroid over a 96×96 carpet for a person standing on this dataset basically doesn't move.
+
+**Why? The structural finding.** The CoP we're computing is "where the feet are planted on the carpet." Feet don't slide during standing or sitting, so CoP barely moves. CoM moves more (33 mm/axis at 1 s) because limbs and torso shift even when feet are fixed. The dataset is dominated by static postures — for CoM, persistence is hard at 54 mm because pose drifts; for CoP, persistence is *trivially near-zero* because feet don't drift.
+
+**Direction A is dead.** A forecaster cannot meaningfully beat 2.5 mm. Don't write `train_phase2_cop.py`.
+
+**The root issue is the dataset, not the target.** ~70 % of frames are static. Every method we evaluate on the full test set is being judged against a baseline where persistence is information-theoretically near-optimal for most frames.
+
+**Salvage value of `compute_cop.py`:** even though CoP is a bad forecasting *target*, it is an excellent **motion detector**. CoP velocity over a few frames tells us cleanly whether someone is actively shifting weight or just standing planted. This is exactly what we need to filter the test set into static-vs-moving subsets — which is now a critical companion experiment to every forecasting result we've reported.
+
+#### Revised priority ranking (supersedes prior orderings)
+
+| # | Step | Why this rank |
+|---|---|---|
+| 1 | **High-motion subset re-evaluation** (this turn) — partition the 5,255 test samples by a motion criterion (peak xy speed during the *future* window), re-evaluate all 6 existing methods on `static` vs `moving` subsets. | Now cheap (~10 min) AND essential. Without this, every method we've reported is being judged on a static-dominated test set where persistence wins by construction. Sharpens the v2 result, the tactile 200ep result, every future result. |
+| 2 | **γ fusion** (tactile + CoM history → CoM future), evaluated with the motion-subset split as headline metric | Binary "does tactile add info beyond pose history" test, evaluated where it has the most chance to show. Persistence is weakest in the moving regime; this is where tactile gets its fair shot. |
+| 3 | **SSL tactile pretraining** if (2) shows γ has signal but the tactile encoder still seems undertrained | Gated on (2). |
+| 4 | **Full-pose forecasting** as a writeup-strengthening side experiment | Optional. |
+
+Direction A removed. CoP demoted from "target" to "tool" (motion-detection filter, used in step 1).
+
+#### `high_motion_subset.py` — design spec (being implemented this turn)
+
+A new script that:
+
+1. **Loads everything needed for inference:** `com_results.p`, `tactile_all.npy`, all available method checkpoints (Phase 1, Phase 2 v1, Phase 2 v2, tactile 50ep, tactile 200ep).
+2. **Builds the full 5,255-sample test set** (same per-session 70/30 chronological split, same outlier filter as Phase 1/2). Sample indices match Phase 1/2 by construction.
+3. **Runs each method on all test samples**, producing `(5255, 10, 3)` predictions per method. ~30–60 s per method on GPU.
+4. **Computes motion criterion per test sample**:
+   ```python
+   future_xy   = com_gt[t+1 : t+1+HORIZON, :2]        # (10, 2)
+   step_speeds = np.linalg.norm(np.diff(future_xy, axis=0), axis=1)   # (9,)  per-frame xy speed
+   v_future    = step_speeds.max()                    # peak xy speed in the target window
+   ```
+   Then split: `moving = (v_future > threshold)`. Threshold chosen via CLI flag `--moving-frac` (default 0.30) so the moving subset is ~30 % of test samples.
+   *Why future-window not history-window:* the question is "is this sample's forecasting hard?", which is purely about whether the next 1 s contains motion. A sample where history is static but the person is about to stand up is "hard"; one where history was moving but the future is static is "easy." Future-window peak motion captures the right thing.
+5. **Computes per-subset metrics** (median / mean / p95 of 3D Euclidean at 1-s horizon plus per-axis) for each method on `full`, `static` (bottom 70 %), `moving` (top 30 %).
+6. **Generates plots:** grouped bar chart (full vs static vs moving for each method); per-horizon line plot on the moving subset; histogram of `v_future` with threshold marker.
+7. **Prints a headline table** showing each method's {full, static, moving} medians + a "skill on moving" column.
+
+Expected outcomes to falsification-check:
+- **persistence's lead on the full set shrinks or vanishes on the moving subset.** If persistence is at 54 mm on full but, say, 150 mm on moving, the "static frames dominate the full metric" hypothesis is confirmed.
+- **Phase 2 v2's relative advantage widens.** It beats persistence by 14 % on full; predict 30-50 % on moving.
+- **Tactile 200ep gets much closer to or past persistence on moving.** Currently 4 mm above persistence on full; predict it goes below persistence on moving, especially on z-axis.
+
+Outputs under `train/com/output/high_motion/`:
+- `metrics.json`
+- `comparison_bars.png` (grouped bars)
+- `error_vs_horizon_moving.png` (per-horizon, moving subset)
+- `motion_threshold_histogram.png` (audit the threshold choice)
+
+Run sequence (after laptop push lands on CRC):
+```bash
+cd ~/IntelligentCarpet
+git pull --rebase origin main
+conda activate carpet
+python train/com/high_motion_subset.py            # default 30 % moving
+# optional: --moving-frac 0.2 or --moving-frac 0.5 to tune
+```
