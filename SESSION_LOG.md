@@ -1822,3 +1822,141 @@ conda activate carpet
 python train/com/high_motion_subset.py            # default 30 % moving
 # optional: --moving-frac 0.2 or --moving-frac 0.5 to tune
 ```
+
+---
+
+### High-motion subset results — the story flips (2026-06-07)
+
+Ran on CRC with the default 30 % moving partition. Threshold: peak xy speed > **40.1 mm/frame** during the future window → 1,577 moving / 3,678 static. The motion histogram is heavily right-skewed: most samples cluster at 0-30 mm/frame; the chosen 40.1 mm/frame threshold cuts cleanly at the distribution's natural shoulder.
+
+**Headline (median 3D Euclidean mm at 1-s horizon):**
+
+| method | full (5255) | static (3678) | moving (1577) | skill@moving |
+|---|---:|---:|---:|---:|
+| persistence | 54.1 | 38.1 | **132.9** | 1.000 |
+| phase1_gru_com | 61.1 | 51.2 | 104.5 | **0.786** |
+| phase2_v1_gru_kp | 66.3 | 57.2 | 95.9 | **0.721** |
+| **phase2_v2_gru_kp** | **46.8** | **37.0** | **91.0** | **0.684** |
+| phase2_tactile_50ep | 63.7 | 51.1 | 114.3 | **0.860** |
+| phase2_tactile_200ep | 58.1 | 46.4 | 111.2 | **0.837** |
+
+**Persistence collapses on moving:** 38 mm → 133 mm (3.5×). v2 grows much more slowly (37 → 91, 2.5×). The full-set numbers were a static-dominated average; the moving subset is the honest performance regime.
+
+**EVERY learned method beats persistence on the moving subset.** First cleanly positive forecasting result of the project. Until now, "persistence beats X" had been the dominant finding on the full set — it was a measurement artifact, not a real conclusion.
+
+**Tactile reverses sign on moving.** Tactile-200ep was *worse* than persistence on full (skill 1.07); on moving it's *better* than persistence (skill 0.84). The earlier "tactile loses" claim from `SESSION_LOG.md (2026-05-29)` was correct for the full set but wrong as a generalization — it was driven by the static frames where there's nothing to forecast.
+
+**But — tactile still loses to camera-pose-history on moving.** Even on the favorable subset where tactile has its best chance:
+- Tactile-200ep: 111 mm
+- Phase 1 GRU (3-dim CoM history): 105 mm
+- Phase 2 v2 (63-dim camera-keypoint history): 91 mm
+
+The tiny 3-dim CoM-history GRU outperforms the tactile model that sees 100×96×96 of raw pressure. The encoder-bottleneck story holds, AND camera-pose history is strictly more useful than tactile in our current setup.
+
+**Per-axis on moving (z is the surprise):**
+- persistence: x=66, y=53, z=12 — z barely moves even on moving subset; weight shifts and steps are primarily horizontal in this dataset.
+- v2: x=41, y=40, z=17 — v2 wins x and y by ~35-40 %; loses z by 5 mm (predicts z motion that isn't there).
+- tactile-200ep: x=55, y=48, z=19 — closer to persistence than to v2; loses z badly.
+
+The "tactile's edge is z" prediction from earlier turns was wrong. On the moving subset, z barely moves (most "motion" here is sit↔stand transitions where the body translates horizontally before the trunk drops, not vertical sway). Persistence-on-z is near-optimal; tactile predicts z motion that doesn't materialize.
+
+**Per-horizon on moving (from `error_vs_horizon_moving.png`):**
+- h=0.1-0.2 s: all methods within ~25-50 mm range.
+- h=0.3 s onward: persistence diverges upward steeply (linear). Learned methods curve concavely.
+- At h=1.0 s: persistence ~280 mm, v2 ~190 mm, tactile-200ep ~252 mm.
+- v2 is at the bottom of all learned methods at every horizon ≥ 0.4 s.
+
+**Implications:**
+1. **All future writeup numbers should report the moving subset as the headline metric**, with full-set as secondary context. The full-set median is dominated by frames where forecasting is information-theoretically near-impossible.
+2. **The tactile encoder is the next architectural lever to investigate**, but γ fusion is the *binary scientific question* that determines whether tactile is worth scaling up at all.
+3. **The "phase1 GRU underperforms persistence on full" claim from 2026-05-25 needs the same caveat:** Phase 1 GRU beats persistence on moving (105 vs 133, 21 % better). It just lost on the static majority.
+4. **Phase 2 v2 is now reproducibly the strongest forecaster across all three subsets** (full / static / moving). It's the bar to beat.
+
+#### Outstanding caveats before declaring tactile dead
+
+1. The tactile encoder is still primitive (3-conv + AdaptiveAvgPool(1)) — Sparsh-style SSL pretraining could change the picture.
+2. The deployment-realistic comparison (v2 forecaster fed `kp_pred_mm` from the existing tactile→pose CNN) is untested. That number is the floor of "what the current end-to-end tactile pipeline can do."
+3. **γ fusion is still the binary test we haven't run.** Until γ runs, we don't know whether tactile adds information *on top of* CoM history. This is the critical experiment.
+
+---
+
+### γ fusion — detailed design (2026-06-07, proposed)
+
+**The scientific question γ tests:**
+*"Conditional on already having access to the CoM history, does the raw tactile signal add forecasting-relevant information?"*
+
+This is the formal version of the project's central claim ("tactile carries pre-movement weight-shift information that precedes CoM displacement"). γ is the experiment that answers it. It's *not* "tactile-alone" (we already ran that — phase2_tactile, β). It's *not* "keypoint-history" (that's v2, δ). γ adds tactile to CoM-history and asks whether the residual information helps.
+
+**Three possible outcomes and what each means:**
+
+| γ result on moving subset | Reading | Project action |
+|---|---|---|
+| γ ≈ Phase 1 GRU (105 mm) | Tactile contributes nothing on top of CoM history. The encoder ignored tactile during training. | Tactile hypothesis falsified at current encoder scale. Move to SSL pretraining of encoder as the last shot; if that also fails, write up honest negative. |
+| Phase 1 > γ > v2 (91-105 mm) | Tactile adds some information but less than the camera-pose history difference. Worth investigating further (γ vs Phase 1 + extra capacity). | Run a "Phase 1 with same capacity as γ" control, then decide if tactile's contribution survives the capacity-matched comparison. |
+| γ < v2 (under 91 mm) | Tactile adds genuinely useful information beyond camera-pose history. Strongest possible positive result for the IntelligentCarpet thesis. | Scale up — SSL pretraining, deployment-realistic eval, cross-subject. |
+| γ unclear (noisy) | Train/eval variance is dominating. | Multi-seed runs to reduce variance. |
+
+#### Architecture
+
+Two-branch model with late concatenation, single output head. Designed so it strictly contains Phase 1 GRU as a sub-model — if the tactile branch is zeroed out, γ reduces to Phase 1.
+
+```
+Inputs:
+    tactile_history : (B, 100, 96, 96)   raw tactile frames, standardized
+    com_history     : (B, 100, 3)        CoM xy z in mm, standardized
+
+Tactile branch:
+    per-frame:    TactileEncoder    (1, 96, 96) -> 128-d        [same as β]
+    sequence:     GRU(128, 128)                                 -> 128-d state h_T
+    Total: ~150k params
+
+CoM branch:
+    sequence:     GRU(3, 64)                                    -> 64-d state h_C
+    Total: ~13k params (matches Phase 1's GRU size exactly)
+
+Fusion + head:
+    concat:       cat([h_T, h_C])                               -> 192-d
+    MLP:          Linear(192, 128) -> ReLU -> Linear(128, 30)   -> 10x3 delta CoM
+    Total: ~30k params
+
+Output: predicted future CoM = CoM(t) + denorm(delta_pred)      same as v2's framing
+```
+
+**Total params: ~190k.** Larger than Phase 1's 15k but smaller than v2's 650k. The capacity is genuinely needed to process the tactile branch — it's not "more capacity for free."
+
+**Why this architecture (and not the alternatives):**
+- **Late fusion** (vs early concat at every frame) keeps the streams modular. We can later run a "freeze CoM branch" ablation (initialize CoM GRU from Phase 1's weights, freeze it, only train tactile + head). That cleanly isolates "tactile's contribution given Phase 1's CoM features."
+- **Same CoM GRU size as Phase 1 (64-hidden, 1-layer).** Apples-to-apples on the CoM branch. Any γ improvement vs Phase 1 is not from "CoM GRU is bigger."
+- **Same TactileEncoder as β** (3-conv + AdaptiveAvgPool + linear, 128 out). Apples-to-apples on the tactile branch. The encoder bottleneck issue carries over, but that's a *known* bottleneck — γ tests whether even THIS encoder's output adds anything when paired with CoM history.
+- **Delta target framing** (v2-style). Predicts displacement from CoM(t), not absolute future CoM. Matches v2 and tactile-200ep so the comparison is clean.
+- **Best-val checkpointing.** 200 epochs (same as v2 and tactile-200ep) with best-val tracking on the val MSE.
+
+#### Training protocol
+
+- Same per-session 70/30 chronological split as Phase 1/2 — sample indices match exactly.
+- Same SEED (42), same outlier filter.
+- Standardization: tactile (scalar mean/std, replayed RNG subset same as β); CoM history (3-dim mean/std on train pool); target delta (3-dim mean/std on train pool).
+- 200 epochs, Adam lr=1e-3, batch=64 (same as β's tactile constraint), best-val checkpoint saved.
+- Evaluation: load best-val, run on test set, compute metrics on full / static / moving subsets. Output the same headline table as `high_motion_subset.py`.
+
+#### Outputs
+
+Under `train/com/output/phase2_gamma/`:
+- `gamma_model.pt`, `gamma_model_best.pt`
+- `metrics.json` (full + static + moving breakdowns)
+- `training_curve.png`
+- `error_vs_horizon.png` (all 3 subsets)
+- `comparison_bars.png` (γ side-by-side with persistence / phase1 / v2 / tactile-200ep)
+- `gamma_vs_phase1_per_horizon.png` — the decisive plot
+
+#### Estimated cost
+
+~3-5 hours on A10 (heavier than β because two branches, but similar tactile dominates). Best as a qsub batch with h_rt=08:00:00. CRC has the cache and checkpoints; nothing else to set up.
+
+#### What I'd build (waiting for green light)
+
+1. `train/com/train_phase2_gamma.py` — new script following the v2 / phase2_tactile patterns.
+2. Optional companion: `train/com/eval_phase2_gamma.py` — eval-only from a checkpoint, in case the run dies at wall-time (like tactile-200ep did).
+3. Update `high_motion_subset.py` to auto-include `phase2_gamma` once its checkpoint exists, so the final headline plot picks it up automatically.
+
+If approved, the implementation is one writing session. The training run is one overnight qsub.

@@ -139,6 +139,32 @@ class TactileForecaster(nn.Module):
         return self.proj(h[-1]).view(B, self.horizon, 3)
 
 
+class GammaForecaster(nn.Module):
+    """Two-branch (tactile + CoM history) -> delta CoM. Mirrors train_phase2_gamma.py."""
+    def __init__(self, tactile_feature_dim=128, tactile_hidden=128, com_hidden=64,
+                 mlp_hidden=128, horizon=HORIZON):
+        super().__init__()
+        self.horizon = horizon
+        self.tactile_encoder = TactileEncoder(tactile_feature_dim)
+        self.tactile_gru     = nn.GRU(tactile_feature_dim, tactile_hidden, batch_first=True)
+        self.com_gru         = nn.GRU(3, com_hidden, batch_first=True)
+        self.fusion = nn.Sequential(
+            nn.Linear(tactile_hidden + com_hidden, mlp_hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(mlp_hidden, horizon * 3),
+        )
+
+    def forward(self, tactile, com_history):
+        B, Tlen, H, W = tactile.shape
+        flat = tactile.reshape(B * Tlen, 1, H, W)
+        feat = self.tactile_encoder(flat).reshape(B, Tlen, -1)
+        _, h_t = self.tactile_gru(feat); h_t = h_t[-1]
+        _, h_c = self.com_gru(com_history); h_c = h_c[-1]
+        fused = torch.cat([h_t, h_c], dim=1)
+        out = self.fusion(fused)
+        return out.view(B, self.horizon, 3)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -318,12 +344,12 @@ def main():
     else:
         print(f'phase2_v2_gru_kp:      SKIP   ({p2v2_pt} missing)')
 
-    # 5/6. Tactile variants (need the cache; batch through to control memory)
+    # 5/6/7. Tactile variants + gamma (need the cache; batch through to control memory)
     tac_cache = os.path.join(_OUT, 'tactile_all.npy')
     if args.no_tactile:
-        print('tactile_*:             SKIP (per --no-tactile)')
+        print('tactile_* / gamma:     SKIP (per --no-tactile)')
     elif not os.path.exists(tac_cache):
-        print(f'tactile_*:             SKIP   ({tac_cache} missing)')
+        print(f'tactile_* / gamma:     SKIP   ({tac_cache} missing)')
     else:
         tactile_all = np.load(tac_cache, mmap_mode='r')
         tac_mean, tac_std, mY, sY = stats_tactile(tactile_all)
@@ -357,6 +383,36 @@ def main():
                     preds[i0:i1] = delta + ref_now[i0:i1][:, None, :]
             predictions[name] = preds
             print(f'{name:<22}: ready')
+
+        # 7. Phase 2 gamma — same tactile cache + CoM-history input. Phase 1 stats for CoM.
+        gamma_pt_best = os.path.join(_OUT, 'phase2_gamma', 'gamma_model_best.pt')
+        gamma_pt      = gamma_pt_best if os.path.exists(gamma_pt_best) else os.path.join(
+            _OUT, 'phase2_gamma', 'gamma_model.pt')
+        if os.path.exists(gamma_pt):
+            mean_p1, std_p1 = stats_phase1()
+            gm = GammaForecaster().to(device)
+            gm.load_state_dict(torch.load(gamma_pt, map_location=device, weights_only=False))
+            gm.eval()
+            preds = np.zeros((n_test, HORIZON, 3), dtype=np.float64)
+            hist_com_norm = (hist_com - mean_p1) / std_p1                # (N, 100, 3) standardized
+            with torch.no_grad():
+                for i0 in range(0, n_test, args.batch_size):
+                    i1 = min(i0 + args.batch_size, n_test)
+                    batch_centers = test_centers[i0:i1]
+                    windows = np.stack(
+                        [(tactile_all[t - HISTORY + 1 : t + 1] - tac_mean) / tac_std
+                         for t in batch_centers],
+                        axis=0
+                    ).astype(np.float32)
+                    tact = torch.from_numpy(windows).to(device)
+                    com_h = torch.from_numpy(hist_com_norm[i0:i1].astype(np.float32)).to(device)
+                    y = gm(tact, com_h).cpu().numpy()
+                    delta = y * sY + mY
+                    preds[i0:i1] = delta + ref_now[i0:i1][:, None, :]
+            predictions['phase2_gamma'] = preds
+            print(f'phase2_gamma:          ready   ({gamma_pt})')
+        else:
+            print(f'phase2_gamma:          SKIP    ({gamma_pt} missing)')
 
     # ---- Compute metrics per subset ----
     def euc(pred, gt):
