@@ -2007,3 +2007,407 @@ User requested an HTML slide deck summarizing the entire CoM forecasting line of
 #### After the deck skeleton exists
 
 Once γ lands on CRC and is pulled back, a 5-10 minute pass to fill slide 13's placeholder with the actual numbers + the decision-hint line. No structural changes; just data.
+
+---
+
+### CNN-free tactile forecaster (ε) — design proposal (2026-06-09)
+
+**Status:** PLAN DRAFT. No code written. Awaiting user resolution of OPEN QUESTIONS below before implementation.
+
+#### What ε is
+
+User-proposed new direction: train a forecaster that **(a)** consumes raw tactile only, **(b)** uses *no* convolutional encoder, **(c)** uses *no* intermediate keypoint or CoM representation as input, and **(d)** still predicts the next 1 s (10 frames) from the past 10 s (100 frames) — same forecasting interval as β / γ / v2.
+
+After a discussion round (2026-06-09), the target and high-level recipe are locked:
+
+- **Output target:** future CoM (10 × 3), via a small probe head attached on top of the GRU's hidden state. Tactile is the only input to the encoder + GRU.
+- **Encoder family:** ViT-style patch tokenization (lead) + flatten-Linear baseline (control). No convolutions in either.
+- **Training recipe:** hybrid SSL — MAE spatial pretrain (Stage 1) → delta-tactile temporal pretrain (Stage 2) → CoM probe (Stage 3). Finetune only if probe results justify it.
+- **Compute budget:** first read in < 2 h on A10. This forces aggressive cuts (see "Compute budget" below).
+
+#### Scientific question
+
+Phrased as a falsifiable hypothesis on the moving subset (the honest evaluation regime — see [SESSION_LOG.md:1828-1854](SESSION_LOG.md#L1828-L1854)):
+
+> *A self-supervised CNN-free tactile encoder followed by a GRU and a tiny CoM probe achieves median 3D Euclidean error at 1-s horizon ≤ β-200ep's 111.2 mm on the moving subset.*
+
+Stronger version (the one we'd really like to claim):
+
+> *…and additionally ≤ Phase 1 GRU's 104.5 mm on the moving subset, meaning that tactile-alone with the right encoder matches CoM-history alone with a tiny GRU.*
+
+If even the weak version fails, the encoder-bottleneck hypothesis ([SESSION_LOG.md:1568](SESSION_LOG.md#L1568)) is *not* supported by this experiment and we should question it. If the strong version holds, tactile representations have been undersold and the original IntelligentCarpet line of work has a real path forward without camera.
+
+#### Relation to existing methods
+
+| method | input | encoder | encoder pretrain | downstream supervision |
+|---|---|---|---|---|
+| persistence | CoM(t) | — | — | — |
+| Phase 1 GRU | CoM(t-99..t) | — (raw 3-d) | — | future CoM |
+| Phase 2 v2 | 21-keypoint history (63-d) | — (raw) | — | future CoM (delta) |
+| **β tactile** | raw tactile (1×96×96)×100 | 3-conv CNN + AdaptiveAvgPool(1) | — | future CoM (delta) |
+| γ fusion | tactile + CoM(t-99..t) | CNN (tactile branch) | — | future CoM (delta) |
+| **ε (this proposal)** | raw tactile (1×96×96)×100 | **ViT (no conv)** | **MAE → delta-tactile SSL** | future CoM (linear/MLP probe) |
+
+ε is structurally a successor to β with two specific changes: encoder family swapped (CNN→ViT) and added SSL pretraining. If ε beats β by a meaningful margin, either change (or both jointly) explains it; if it doesn't, the encoder-bottleneck story dies.
+
+#### Literature review (concise)
+
+State of the art for tactile representation learning (Nov 2024 – early 2026) has converged on **patch-tokenized transformers pretrained with self-supervised objectives**, displacing the CNN-on-tactile-image paradigm that the original IntelligentCarpet paper used.
+
+**Most relevant prior work:**
+
+- **Sparsh** (Higuera et al., FAIR / UW / CMU, CoRL 2024, [arXiv 2410.24090](https://arxiv.org/abs/2410.24090)). First general-purpose tactile encoder. Pretrained on 460K+ tactile images from vision-based sensors (GelSight, DIGIT). Compared MAE, DINO, IJEPA, JEPA variants. **DINO and IJEPA were the strongest** on their downstream benchmark (TacBench, 6 tasks). SSL pretraining beat task-specific end-to-end training by **95.1 % on average**. Strongest direct evidence that tactile SSL is the lever — though their sensors are vision-based (camera-into-gel), not pressure-grid like ours.
+- **Transferable Tactile Transformers (T3)** (Zhao et al., 2024, [arXiv 2406.13640](https://arxiv.org/abs/2406.13640)). Cross-sensor / cross-task representation learning with transformers. Validates that the transformer is the right encoder family across heterogeneous tactile sources.
+- **Spatio-temporal Masked Transformers for Pressure Pose Estimation** (Lopes et al., 2023, [arXiv 2303.05691](https://arxiv.org/abs/2303.05691)). *Directly relevant.* Pressure mat → 3D pose with a masked-transformer architecture. Closest published peer to our setup; uses pressure grid, not vision-based tactile. Their architecture and masking strategy are a strong reference for ε's Stage 1.
+- **Bodies at Rest** (Clever et al., CVPR 2020, [arXiv 2004.01166](https://arxiv.org/abs/2004.01166)). CNN baseline for pressure → 3D pose+shape. Pre-transformer era; their CNN choice is closest to what β does today.
+- **IntelligentCarpet** (Luo et al., CVPR 2021). The original of this dataset. CNN-only, no SSL, instantaneous pose (not forecasting).
+
+**Gaps in the literature (where ε sits):**
+
+1. **No published work on forecasting future pressure or future CoM from a pressure grid.** All cited work is *instantaneous* pose / posture estimation. The forecasting (10 s → 1 s) angle is genuinely under-explored. This is a small literature gap we can occupy.
+2. **No SSL pretraining published on pressure-grid sensors specifically.** Sparsh is vision-based gel sensors; T3 is multi-sensor but heavily gel-weighted. We'd be applying the SSL recipe to a different sensor modality (low-channel pressure grid vs RGB gel image).
+3. **No published comparison of ViT vs CNN on pressure grids at this scale.** Our flatten-Linear baseline + ViT comparison is a small but novel contribution.
+
+**Methodological takeaways imported from this literature:**
+
+- Patch size in tactile MAE: typical settings use 16×16 patches at 96×96 resolution (Sparsh, MV-MAE, MAE-Touch). We adopt the same.
+- Mask ratio: MAE uses 75 % (Sparsh DINO uses different non-masking SSL); we'll use 75 % for the MAE stage.
+- Encoder depth: most tactile transformers use small encoders (2–4 transformer blocks, D=128–256) because data scale is limited. ε adopts 2 blocks, D=128, to keep parameter count comparable to β's ~150K and to fit the < 2 h budget.
+
+#### Architecture — three stages
+
+```
+Inputs (always):
+  tactile_window : (B, 100, 96, 96)   raw normalized tactile, 100 frames @ 10 fps
+
+Per-frame encoder (Stage 1 trains it; Stage 2 finetunes; Stage 3 probes):
+  patchify:       (96, 96)  ->  (36, 256)        6x6 grid of 16x16 patches
+  embed:          Linear(256, D=128)             per patch
+  pos_embed:      add learned (36, 128)
+  transformer:    2 blocks, 4 heads, FFN=4*D
+  pool:           mean over 36 tokens
+  output:         (B, 100, 128)                  per-frame feature sequence
+
+Temporal backbone:
+  gru:            GRU(input=128, hidden=128, layers=1)
+  state:          h_T = final hidden state, shape (B, 128)
+
+Decoders / heads (differ per stage):
+  Stage 1 (MAE):    transformer decoder (1 block) + linear -> reconstruct masked patches
+  Stage 2 (delta):  Linear(128, 10*96*96) -> reshape (B, 10, 96, 96), predict delta-tactile
+  Stage 3 (probe):  Linear(128, 30) or MLP(128->64->30) -> reshape (B, 10, 3), predict delta-CoM
+```
+
+**Stage 1: MAE-style spatial pretraining (encoder only, no GRU yet)**
+
+- Task: per-frame, mask 27 of 36 patches (75 %), reconstruct the masked patches from the unmasked 9. Loss = MSE on masked pixels only.
+- Data: all 32,600 tactile frames from `singlePerson_test/`. Each frame is one SSL sample → 32.6K examples.
+- Trains: ViT encoder + a *separate* small transformer decoder used only at this stage. Decoder discarded after.
+- Hyperparams (proposed): batch=128 frames, lr=3e-4, AdamW, epochs=30 (decided by training-curve plateau).
+- Expected cost: ~20 min on A10 (small ViT, single-frame batches).
+
+**Stage 2: Delta-tactile temporal pretraining (encoder + GRU)**
+
+- Task: given `tactile(t-99..t)`, predict `Δ_tactile(t+1..t+10) = tactile(t+1..t+10) - tactile(t)`. Loss = MSE on the 10×96×96 delta volume.
+- **Why delta, not raw**: at 10 fps, raw next-frame ≈ current frame; the model can shortcut by predicting persistence. Predicting *changes* forces it to learn the dynamics that matter (the small pre-movement pressure shifts the whole project hypothesis depends on). This is the same trick that took v2 from 66 → 47 mm at the CoM level ([SESSION_LOG.md:1547-1551](SESSION_LOG.md#L1547-L1551)).
+- Encoder initialized from Stage 1 checkpoint. Decoder is a fresh `Linear(128, 10*96*96)` head on the GRU's final hidden state.
+- Data: same 17,218 windows as Phase 1/2/β (same chronological 70/30 split). Crucially: even though this is "SSL," the windows align with the downstream task's windows so Stage 3's probe has the right hidden states to read from.
+- Hyperparams (proposed): batch=32 (heavier than β because of decoder output size), lr=1e-3, Adam, epochs=20 (decided by val-MSE plateau).
+- Expected cost: ~50 min on A10. The 92,160-dim output dominates the cost; we can drop to 20 epochs and accept some underfitting given the 2-h budget.
+- Sanity check baseline: report a "tactile-persistence loss" (model that predicts Δ=0 everywhere). Stage 2's val loss must be meaningfully below this, otherwise the encoder + GRU learned nothing.
+
+**Stage 3: CoM probe (head only)**
+
+- Freeze encoder + GRU from Stage 2. Attach a fresh probe head: `Linear(128, 30)` (linear probe) AND separately `MLP(128 → 64 → 30)` (tiny MLP probe).
+- Train both probes on the 17K-sample downstream task with delta-CoM target (same as β / γ / v2). Best-val checkpointing.
+- Hyperparams: batch=64, lr=1e-3, Adam, epochs=30. Expected cost: ~10 min total for both probes (they're tiny).
+- **Why two probes**: a linear probe answers "is the CoM signal *linearly* in the representation?" A tiny MLP probe answers "is it accessible with mild non-linearity?" If linear works → strongest claim about representation quality. If only MLP works → weaker but still positive.
+
+**Stage 4 (conditional, only if probes justify it): finetune**
+
+- If a probe beats β-200ep (111 mm) by a clear margin: stop, write up.
+- If a probe is *close to* β-200ep but doesn't beat it: unfreeze encoder + GRU at lr=1e-5 and finetune end-to-end for 10 more epochs with the probe head. ~20 min. Records the finetune delta as a separate result.
+
+#### Baseline: flatten-Linear encoder (control)
+
+Run the same 3-stage recipe with the ViT replaced by:
+
+```
+patchify:       (96, 96) -> (9216,)
+embed:          Linear(9216, 128)
+```
+
+No spatial tokenization, no attention. Everything downstream (GRU, decoders, heads, training protocol) is identical.
+
+**Why include this:** if ViT-ε ≈ flatten-ε on the downstream probe, the win (if any) is from SSL + better head, not from spatial structure. If ViT-ε > flatten-ε, spatial tokenization specifically matters.
+
+**Compute caveat:** the flatten baseline doubles total time. Within the < 2 h budget, we can run **ViT first** and only add the flatten baseline if ViT shows promise. Alternative: cut both to 15 epochs each in Stage 2.
+
+#### Evaluation protocol
+
+Drop ε's probe outputs into the existing `high_motion_subset.py` comparison alongside `persistence`, `phase1_gru_com`, `phase2_v1`, `phase2_v2`, `phase2_tactile_50ep`, `phase2_tactile_200ep`, and (when it lands) `phase2_gamma`. Same partition: full / static / moving. Headline metric: moving-subset median 3D Euclidean at 1-s horizon.
+
+For ε we report:
+- ε-ViT-linear-probe
+- ε-ViT-MLP-probe
+- ε-flatten-MLP-probe (if run)
+- ε-ViT-finetuned (if Stage 4 triggered)
+
+Plus the Stage 1 MAE val-loss curve and Stage 2 delta-tactile val-loss-vs-persistence-baseline curve as separate diagnostic plots (they don't go on the comparison chart, but they tell us whether SSL actually worked).
+
+#### Compute budget — < 2 h on A10
+
+| stage | what | rough cost |
+|---|---|---|
+| 1 | MAE pretrain, ViT, 30 ep | 20 min |
+| 2 | Delta-tactile pretrain, ViT+GRU, 20 ep | 50 min |
+| 3 | Linear + MLP probes | 10 min |
+| | **ViT pass total** | **~80 min** |
+| (cond.) | Stage 4 finetune | +20 min |
+| (cond.) | Flatten baseline (Stage 1 skipped — no spatial tokens to mask sensibly; only Stage 2 + 3) | +30 min |
+| | **Worst case all included** | **~130 min** |
+
+If the < 2 h ceiling is hard, drop Stage 4 and the flatten baseline from the first run; add them only after seeing the ViT probe result.
+
+#### Outputs (under `train/com/output/phase2_epsilon/`)
+
+- `mae_encoder.pt` — Stage 1 ViT encoder checkpoint
+- `dynamics_model.pt` — Stage 2 encoder+GRU checkpoint (frozen weights for Stage 3)
+- `probe_linear.pt`, `probe_mlp.pt` — Stage 3 probe heads
+- `flatten_dynamics.pt`, `flatten_probe_mlp.pt` — baseline equivalents (if run)
+- `metrics.json` — all probe results in the same schema as β / γ
+- `mae_recon_examples.png` — qualitative reconstruction check (6 examples)
+- `stage2_val_loss_curve.png` — delta-tactile val loss vs persistence floor
+- `probe_training_curve.png`, `error_vs_horizon.png`, `comparison_bars.png`
+
+#### Files to create (only after OPEN QUESTIONS resolved)
+
+1. `train/com/train_phase2_epsilon.py` — one orchestrator script with sub-commands `--stage {mae,dynamics,probe,all}`. Defaults to `all`. Mirrors the layout of `train_phase2_tactile.py` and `train_phase2_gamma.py`.
+2. `train/com/eval_phase2_epsilon.py` — eval-only from a checkpoint, in case the run dies at wall-time (recovered β-200ep this way; same insurance for ε).
+3. Optional companion: small `train/com/model_epsilon.py` for the ViT + MAE decoder + GRU classes if `train_phase2_epsilon.py` gets too long.
+4. Auto-include in `high_motion_subset.py`: when `phase2_epsilon/metrics.json` exists, pick it up automatically (same pattern as γ).
+
+#### OPEN QUESTIONS (must be resolved before any code)
+
+1. **ViT depth and width.** Proposal: 2 blocks, 4 heads, D=128, FFN=512. This gives ~200K-param encoder, close to β's 150K. Alternative: 4 blocks for more capacity at the cost of more SSL data needs and overfit risk. **Q: stick with 2 blocks, or go to 4?**
+
+2. **Mask ratio for Stage 1 MAE.** Proposal: 75 % (the MAE / Sparsh default). For tactile specifically, 75 % might be too aggressive because most of the signal is concentrated in a few patches; masking 75 % of patches might leave only baseline-pressure patches visible and make the task trivially impossible. Alternative: 50 %. **Q: 75 % default, or be more conservative at 50 %?**
+
+3. **Delta-tactile loss weighting.** Most of the 96×96 grid has near-zero deltas (baseline pressure stays baseline). The MSE will be dominated by easy zeros. Options:
+   - (a) plain MSE over all cells — simple, but the loss landscape may be dominated by easy zeros
+   - (b) weighted MSE — higher weight on cells that have non-zero pressure in the current frame (the "active region")
+   - (c) plain MSE but report a separate "active-region MSE" as the diagnostic metric
+   **Q: which?** I'd lean (c) — simplest, doesn't change the loss landscape, and the diagnostic catches whether the model learned anything useful in the active region.
+
+4. **Sample alignment for Stage 1 MAE.** Stage 1 sees individual frames. Should we use:
+   - (a) all 32,600 frames from the test/ dataset
+   - (b) only frames inside the 70 % train split's *windows* (avoid future leakage)
+   - (c) only frames that are *centers* of train windows (most conservative)
+   **Q: which?** Strict cleanest answer is (b) or (c). Sparsh-style pretraining typically does (a), arguing that SSL doesn't see CoM labels so isn't really "cheating." **My lean: (b)** — uses ~90 % of the frames, still strict about not seeing test-window content.
+
+5. **Tactile standardization for Stage 1 vs Stage 2.** β uses a single global mean/std estimated from 1000 random train windows. For ε, do we reuse that, or re-estimate? **Q: reuse β's stats (cleaner comparison), or re-estimate (cleaner per-experiment)?** My lean: reuse β's stats, written explicitly in the metrics.json.
+
+6. **Run order under the < 2 h budget.** Three possible packings:
+   - (a) ViT-only first read (Stages 1+2+3, no Stage 4, no flatten baseline). ~80 min. Cleanest test of the ViT-encoder hypothesis.
+   - (b) ViT + flatten baseline (Stage 2+3 only for flatten). ~110 min. Answers "is ViT specifically the win, or just SSL?"
+   - (c) ViT + Stage 4 finetune (no flatten baseline). ~100 min. Answers "if probe fails, does finetune save it?"
+   **Q: which packing?** My lean: (a) for the first run, then schedule (b) or (c) as a follow-up depending on what (a) shows.
+
+7. **Acceptance criterion.** Above I wrote a "weak" claim (≤ β-200ep's 111 mm) and a "strong" claim (≤ Phase 1's 104.5 mm). What counts as "success" for *this* run? **Q: is the weak claim enough to declare ε a positive result, or do we need the strong claim?** This shapes how we write up the result.
+
+8. **Failure mode handling.** If Stage 2's delta-tactile val loss never gets below the persistence floor → encoder+GRU learned nothing. Should we (a) abort and report negative, (b) try a smaller mask ratio in Stage 1 and redo, (c) drop the SSL and just go encoder+GRU+probe end-to-end as a fallback? **Q: pre-commit to which fallback?** Default: (a) — report honest negative, document the failure mode.
+
+#### What I am NOT doing in this proposal (deferred)
+
+- Sparse PointNet / set-based encoder. Conflicts with the future-tactile SSL target (PointNet doesn't generate grids). Could be a separate experiment if ε underperforms.
+- Cross-subject evaluation. Same per-session 70/30 chronological split as everything else for direct comparability.
+- Multi-seed runs. Single seed (SEED=42) for the first read; multi-seed comes after if results justify.
+- Tactile-augmented data (rotation, scaling, etc). Pressure-grid augmentations are nontrivial because position is semantically meaningful.
+- Finetuning the GRU separately from the encoder. Stage 4 unfreezes both jointly if triggered.
+
+#### Resolutions (2026-06-09, locked)
+
+User resolved the OPEN QUESTIONS as follows. Plan above stays authoritative; this subsection records the final choices so a future reader doesn't have to derive them from a conversation.
+
+| # | question | resolution |
+|---|---|---|
+| 1 | ViT depth/width | **2 blocks, 4 heads, D=128, FFN=512** (as proposed) |
+| 2 | Stage 1 MAE mask ratio | **75 %** (try the MAE / Sparsh default first; revisit only if Stage 1 fails) |
+| 3 | Stage 2 loss weighting | **plain MSE over all cells + separate active-region MSE as a diagnostic metric** (not as a loss term) |
+| 4 | Stage 1 frame source | **frames inside the train split's windows only** (no future leakage; ~90 % of frames) |
+| 5 | Tactile standardization stats | **reuse β's stats via a JSON cache** (`train/com/output/tactile_stats.json`). One-time seeding from β's stdout log (or a tiny extract script). β / γ / ε all read from this file going forward. |
+| 6 | Run order under < 2 h | **ViT-only first read** (Stages 1+2+3, no flatten baseline, no Stage 4). Schedule flatten baseline and Stage 4 as follow-ups only if Stage 3 probe results justify them. |
+| 7 | Acceptance criterion | **defer until results land**. Plan above lists a weak claim (≤ β-200ep's 111 mm) and a strong claim (≤ Phase 1's 104.5 mm) — decide which we hold ε to after seeing Stage 3 metrics. |
+| 8 | Failure-mode handling | **defer until results land**. Plan above lists three options; decide once we see Stage 2's val loss vs the tactile-persistence floor. |
+
+**One implication of #5 worth highlighting:** β does not currently save its tactile stats to a JSON file — they only appear in stdout. To seed `tactile_stats.json` for ε we have two options: (a) read the values from β's existing run log on CRC and write a 2-line JSON, or (b) write a small `seed_tactile_stats.py` that re-runs just the sampling block deterministically and writes the file. (b) is more reproducible if the β log is ever lost; (a) is faster. Will pick when the implementation starts.
+
+---
+
+### ε implementation landed (2026-06-09)
+
+Decisions above translated to code in one sitting after the user's green light. No CRC run yet — everything below is laptop-only smoke-tested.
+
+**Files added under `train/com/`:**
+
+| file | purpose | LOC |
+|---|---|---:|
+| `seed_tactile_stats.py` | One-time seeder for `train/com/output/tactile_stats.json`. Reproduces β's deterministic 1000-window sample. Idempotent (`--force` to overwrite). | 124 |
+| `model_epsilon.py` | Model classes (no `main`, no side effects). `ViTEncoder`, `MAEDecoder`, `DynamicsModel`, `LinearProbe`, `MLPProbe`, `EpsilonForecaster`, `FlattenEncoder`. Patchify / unpatchify helpers. All constants. | 271 |
+| `train_phase2_epsilon.py` | Orchestrator with `--stage {mae, dynamics, probe, all}`. Each stage has its own training loop, checkpointing, plots. | 510 |
+| `eval_phase2_epsilon.py` | Re-eval from saved checkpoints. Resume insurance against wall-time deaths. Overwrites `metrics.json`. | 162 |
+
+**File modified: `train/com/high_motion_subset.py`.** Added an `phase2_epsilon_linear` / `phase2_epsilon_mlp` block alongside the existing γ block. Auto-included whenever `dynamics_model.pt` + at least one of the two probe checkpoints exist. Imports from `model_epsilon` so the class definitions stay single-source.
+
+**One Q5-decided detail:** `seed_tactile_stats.py` re-runs β's exact sampling block deterministically (chose option (b)). Output JSON contains `tactile_mean`, `tactile_std`, plus provenance fields. β / γ / ε / future scripts now share a single source of truth.
+
+**One material design change vs the plan above:** Stage 2 decoder was committed to the **factored patch-latent variant** (~1.5M params) instead of the big `Linear(128, 10×96×96)` (~11.8M params) the plan implied. Factored decoder: `Linear(128, 256) → ReLU → Linear(256, 10×36×16) → Linear(16, 256) per-patch → unpatchify`. No convolutions, ~8× smaller, fits the budget. Choice was made explicit with the user before writing the code.
+
+#### Architecture confirmed by smoke test
+
+Parameter counts at instantiation (laptop, PyTorch 2.12.0+cpu):
+
+| component | params | when used |
+|---|---:|---|
+| `ViTEncoder` (2 blocks, 4 heads, D=128, FFN=512) | 434,304 | Stages 1, 2, 3 (shared) |
+| `MAEDecoder` (1 block + mask token + pos embed + linear head) | 236,288 | Stage 1 only — discarded after |
+| GRU(128, 128, 1 layer) | 99,072 | Stages 2, 3 (shared) |
+| Stage 2 factored patch-latent decoder | 1,517,696 | Stage 2 only — discarded after |
+| `LinearProbe` (`Linear(128, 30)`) | 3,870 | Stage 3 head |
+| `MLPProbe` (`Linear(128, 64) → ReLU → Linear(64, 30)`) | 10,206 | Stage 3 head |
+| **inference-time model = encoder + GRU + probe** | **543,582** | Stage 3 eval, high_motion_subset auto-include |
+| `FlattenEncoder` (deferred baseline) | 1,179,776 | follow-up only |
+
+Inference-time ε is **smaller than v2** (~650K) but uses much heavier raw inputs (100×96×96 tactile windows vs 100×63 keypoints).
+
+#### Smoke-test results (laptop, no CRC needed)
+
+All five Python entry points import cleanly with **no training side effects**:
+- `import seed_tactile_stats` — no I/O
+- `import model_epsilon` — no I/O, no side effects (matches the β / γ convention)
+- `import train_phase2_epsilon` — no I/O; all heavy execution is gated inside `main()`
+- `import eval_phase2_epsilon` — no I/O
+- `import high_motion_subset` — no I/O after the patch (no regression)
+
+Forward + backward smoke test with `B=4` random data passed all shape assertions:
+- `patchify` / `unpatchify` round-trip exact (max abs diff = 0)
+- ViT encoder: `(4, 96, 96) → (4, 128)` ✓
+- ViT encoder partial-tokens (K=9 visible patches): `(4, 9, 128)` ✓
+- MAE decoder: `(4, 9, 128) + (4, 9) → (4, 36, 256)` ✓
+- DynamicsModel forward: `(4, 100, 96, 96) → (4, 10, 96, 96)` ✓
+- DynamicsModel `encode_history`: `(4, 100, 96, 96) → (4, 128)` ✓
+- Both probes: `(4, 128) → (4, 10, 3)` ✓
+- Backward through DynamicsModel: ran without error
+
+Two PyTorch UserWarnings (`enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True`) are non-fatal PyTorch 2.x cosmetic notices; ignored.
+
+#### Launch sequence for CRC
+
+```bash
+# 1. Pull on CRC
+cd ~/IntelligentCarpet
+git status                          # clean
+git pull --rebase origin main       # brings 4 new files + 1 patch
+ls train/com/train_phase2_epsilon.py
+ls train/com/model_epsilon.py
+
+# 2. One-time setup (seeds the shared tactile stats; ~10 s, CPU)
+qrsh -q gpu -l gpu_card=1 -pe smp 4 -l h_rt=04:00:00       # if not already on a GPU node
+module load conda && module load cuda/12.1
+conda activate carpet
+cd ~/IntelligentCarpet
+python -u train/com/seed_tactile_stats.py
+
+# 3. Run epsilon end-to-end (~80 min on A10 at the default epochs)
+python -u train/com/train_phase2_epsilon.py --stage all \
+    2>&1 | tee train/com/output/phase2_epsilon/run.log
+
+# 4. (After epsilon lands) Re-run the all-method comparison; epsilon picks up automatically.
+python -u train/com/high_motion_subset.py
+```
+
+If wall-time dies mid-Stage 3 after the probes are saved, recover with:
+```bash
+python -u train/tactile_direct/eval_phase2_epsilon.py 2>&1 | tee train/com/output/phase2_epsilon/eval_rerun.log
+```
+
+#### Source relocated to `train/tactile_direct/` (2026-06-09, same session)
+
+User requested the ε source files live in a sibling folder to `train/com/`, since ε is conceptually a different research direction (raw tactile → CoM directly, no intermediate-representation pipeline through `compute_com.py`). Moved:
+
+- `train/com/model_epsilon.py` → `train/tactile_direct/model_epsilon.py`
+- `train/com/train_phase2_epsilon.py` → `train/tactile_direct/train_phase2_epsilon.py`
+- `train/com/eval_phase2_epsilon.py` → `train/tactile_direct/eval_phase2_epsilon.py`
+
+**Kept in `train/com/`:**
+- `seed_tactile_stats.py` — shared utility; β / γ / ε all read its output.
+- `high_motion_subset.py` patch — its `sys.path.insert` was updated to point at `train/tactile_direct/` so `from model_epsilon import ...` still works.
+
+**Outputs (checkpoints, metrics, plots) kept at `train/com/output/phase2_epsilon/`** — deliberate. The alternative — moving outputs to a sibling `train/output/` — would require patching all 16 scripts that hardcode `_HERE/output` plus `git mv`-ing the live `train/com/output/` directory on CRC (with β / γ checkpoints and the 1.2 GB `tactile_all.npy` cache). User opted to defer that to a later focused commit; tracked here.
+
+**Path handling after the move.** In the two relocated training scripts:
+```python
+_HERE  = os.path.dirname(os.path.abspath(__file__))   # train/tactile_direct/
+_TRAIN = os.path.dirname(_HERE)                        # train/
+_OUT   = os.path.join(_TRAIN, 'com', 'output')         # reaches sideways into com/output/
+```
+Everything downstream (`_CACHE_NPY`, `_STATS`, `_EPSILON`, etc.) inherits from `_OUT` so the relocation is contained to one line per file.
+
+**Updated launch command** (replaces step 3 in the launch sequence above):
+```bash
+python -u train/tactile_direct/train_phase2_epsilon.py --stage all \
+    2>&1 | tee train/com/output/phase2_epsilon/run.log
+```
+
+**Re-smoke-test passed.** All five entry points still import side-effect-free; `_OUT` resolves to `train/com/output/` from the new location; `high_motion_subset.py` finds `model_epsilon` after the path update.
+
+**Tracked for follow-up:** consolidate `train/com/output/` → `train/output/` as a separate refactor commit after ε results land. 16 scripts to patch in one atomic change.
+
+#### Operational note: laptop has no `tactile_all.npy` (2026-06-09)
+
+The 1.2 GB tactile cache lives ONLY on CRC. Confirmed with the user. Decision: keep it that way; no local copy, no scaled-down local test cache.
+
+**What this means for the run-where matrix:**
+
+| operation | laptop | CRC |
+|---|:-:|:-:|
+| Edit code, imports, smoke-test model shapes | ✅ | ✅ |
+| `seed_tactile_stats.py` | ❌ (needs cache) | ✅ |
+| `train_phase2_epsilon.py --stage *` | ❌ (needs cache + GPU) | ✅ |
+| `eval_phase2_epsilon.py` | ❌ (needs cache) | ✅ |
+| `high_motion_subset.py` (default) | ❌ (β / γ / ε load tactile) | ✅ |
+| `high_motion_subset.py --no-tactile` | ✅ (persistence / Phase 1 / v1 / v2 only) | ✅ |
+| Inspect `metrics.json`, view PNGs pulled back from CRC | ✅ | n/a |
+
+**Workflow loop:**
+
+```
+[laptop]  edit code, commit, push
+   │
+   ▼
+[CRC]     pull, seed_tactile_stats.py (idempotent),
+          train_phase2_epsilon.py --stage all,
+          high_motion_subset.py,
+          commit checkpoints + metrics + plots, push
+   │
+   ▼
+[laptop]  pull, inspect metrics.json, view PNGs, decide next step
+```
+
+**Implication for the `--epochs-mae 1 --epochs-dynamics 1` smoke-train I suggested in the run guide earlier this session: it does NOT work on the laptop** (needs the cache). It only works on CRC, where there's no reason to use it — the laptop import smoke-test already covered the "does the code load and forward" question.
+
+#### What this run will tell us
+
+Three result regimes, mapped to the falsifiable hypotheses from the plan section above:
+
+| ε MLP probe median (mm, MOVING subset) | Reading |
+|---|---|
+| ≥ 111 (β-200ep) | Encoder bottleneck story is **wrong** — even with a CNN-free ViT and SSL, tactile alone can't match β's CNN. Significant rethink needed. |
+| 91 – 111 | ε beats β but loses to v2 / γ. **Weak positive** — the encoder *was* part of the bottleneck, but the deeper limitation isn't encoder-architectural. |
+| 91 – 104 | ε is between Phase 1 and v2. **Real positive** — SSL+ViT gives tactile-alone something useful that the CNN encoder couldn't extract. |
+| < 91 (v2) | **Strong positive** — first time tactile-alone matches camera-pose-history. Would justify writing this up. |
+
+Acceptance threshold (#7 in the OPEN QUESTIONS resolutions) decided after the first result lands.
+
+---
+

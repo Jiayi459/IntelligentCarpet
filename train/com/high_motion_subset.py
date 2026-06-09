@@ -58,6 +58,10 @@ _TRAIN = os.path.dirname(_HERE)
 _OUT   = os.path.join(_HERE, 'output')
 _HM    = os.path.join(_OUT, 'high_motion')
 
+# So `import model_epsilon` works when we re-run the epsilon forecaster below.
+# epsilon source lives at train/tactile_direct/ (parallel to train/com/).
+sys.path.insert(0, os.path.join(_TRAIN, 'tactile_direct'))
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -413,6 +417,54 @@ def main():
             print(f'phase2_gamma:          ready   ({gamma_pt})')
         else:
             print(f'phase2_gamma:          SKIP    ({gamma_pt} missing)')
+
+        # 8. Phase 2 epsilon — CNN-free ViT + GRU + probe head. Uses tactile only.
+        #    Reuses the same tac_mean/tac_std already computed above (= beta's stats,
+        #    seeded by seed_tactile_stats.py).
+        eps_dyn  = os.path.join(_OUT, 'phase2_epsilon', 'dynamics_model.pt')
+        eps_lin  = os.path.join(_OUT, 'phase2_epsilon', 'probe_linear.pt')
+        eps_mlp  = os.path.join(_OUT, 'phase2_epsilon', 'probe_mlp.pt')
+        if os.path.exists(eps_dyn) and (os.path.exists(eps_lin) or os.path.exists(eps_mlp)):
+            from model_epsilon import DynamicsModel, LinearProbe, MLPProbe
+            dyn = DynamicsModel().to(device)
+            dyn.load_state_dict(torch.load(eps_dyn, map_location=device, weights_only=False)['dynamics'])
+            dyn.eval()
+
+            # Encode test hidden states once (shared across both probes)
+            H_test = np.zeros((n_test, 128), dtype=np.float32)  # GRU_HIDDEN = 128
+            with torch.no_grad():
+                for i0 in range(0, n_test, args.batch_size):
+                    i1 = min(i0 + args.batch_size, n_test)
+                    batch_centers = test_centers[i0:i1]
+                    windows = np.stack(
+                        [(tactile_all[t - HISTORY + 1 : t + 1] - tac_mean) / tac_std
+                         for t in batch_centers],
+                        axis=0
+                    ).astype(np.float32)
+                    x = torch.from_numpy(windows).to(device)
+                    H_test[i0:i1] = dyn.encode_history(x).cpu().numpy()
+            H_test_t = torch.from_numpy(H_test).to(device)
+
+            def run_probe(probe_cls, probe_ckpt, name):
+                probe = probe_cls().to(device)
+                probe.load_state_dict(torch.load(probe_ckpt, map_location=device, weights_only=False)['probe'])
+                probe.eval()
+                with torch.no_grad():
+                    y_norm = probe(H_test_t).cpu().numpy()
+                delta = y_norm * sY + mY
+                predictions[name] = delta + ref_now[:, None, :]
+                print(f'{name:<22}: ready   ({probe_ckpt})')
+
+            if os.path.exists(eps_lin):
+                run_probe(LinearProbe, eps_lin, 'phase2_epsilon_linear')
+            else:
+                print(f'phase2_epsilon_linear: SKIP   ({eps_lin} missing)')
+            if os.path.exists(eps_mlp):
+                run_probe(MLPProbe, eps_mlp, 'phase2_epsilon_mlp')
+            else:
+                print(f'phase2_epsilon_mlp:    SKIP   ({eps_mlp} missing)')
+        else:
+            print(f'phase2_epsilon_*:      SKIP   ({eps_dyn} or probes missing)')
 
     # ---- Compute metrics per subset ----
     def euc(pred, gt):
