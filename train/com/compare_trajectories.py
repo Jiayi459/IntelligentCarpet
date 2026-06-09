@@ -201,25 +201,56 @@ print(f'samples: total={len(centers)}, train={train_mask.sum()}, test={test_mask
 
 
 # ---------------------------------------------------------------------------
-# Pick 5 random test samples (separate RNG -> does NOT touch the global one
-# that training scripts use later for permutation-based standardization).
+# Pick three subset selections: random / moving / static (5 each, SEED=42).
+# We build the union of unique indices and run inference once -- the same
+# predictions array gets indexed three different ways for the three plots.
+# Motion criterion matches high_motion_subset.py exactly: peak xy speed during
+# the 10-frame future window, top 30% = moving.
 # ---------------------------------------------------------------------------
 
-sel_rng           = np.random.default_rng(SEED)
-sel_idx_in_test   = sel_rng.choice(len(test_centers), size=N_SAMPLES_TO_PLOT, replace=False)
-sel_frame_centers = test_centers[sel_idx_in_test]
-sel_subjects      = test_subjects[sel_idx_in_test]
-print(f'selected test sample indices: {sel_idx_in_test.tolist()}')
-print(f'  frame centers t:            {sel_frame_centers.tolist()}')
-print(f'  subjects:                   {sel_subjects.tolist()}')
+# Motion criterion for every test sample
+full_future_xy = np.stack([com_gt[t + 1 : t + 1 + HORIZON, :2] for t in test_centers], axis=0)  # (n_test, 10, 2)
+step_diffs     = np.diff(full_future_xy, axis=1)                                                  # (n_test, 9, 2)
+step_speeds    = np.linalg.norm(step_diffs, axis=2)                                               # (n_test, 9)
+v_future       = step_speeds.max(axis=1)                                                          # (n_test,)
+MOVING_FRAC    = 0.30
+motion_thresh  = float(np.quantile(v_future, 1.0 - MOVING_FRAC))
+moving_in_test = v_future > motion_thresh
+print(f'motion threshold (top {MOVING_FRAC:.0%}): {motion_thresh:.2f} mm/frame  '
+      f'-- moving={moving_in_test.sum()}, static={(~moving_in_test).sum()}')
 
+# Three sample selections (SEED=42, separate RNG so we don't touch the global one)
+sel_rng = np.random.default_rng(SEED)
+def _pick(pool, k):
+    return pool[sel_rng.choice(len(pool), size=k, replace=False)] if len(pool) >= k else pool
 
-# Inputs each method might need (only on the 5 samples)
-hist_com    = np.stack([com_gt[t - HISTORY + 1 : t + 1] for t in sel_frame_centers], axis=0)        # (5, 100, 3)
+random_idx_in_test = _pick(np.arange(len(test_centers)), N_SAMPLES_TO_PLOT)
+moving_idx_in_test = _pick(np.where(moving_in_test)[0], N_SAMPLES_TO_PLOT)
+static_idx_in_test = _pick(np.where(~moving_in_test)[0], N_SAMPLES_TO_PLOT)
+
+# Union (dedup so inference work doesn't repeat on overlapping picks)
+all_idx_in_test = np.unique(np.concatenate([random_idx_in_test,
+                                             moving_idx_in_test,
+                                             static_idx_in_test]))
+print(f'sample selections (5 each, SEED={SEED}):')
+print(f'  random  in test idx: {random_idx_in_test.tolist()}')
+print(f'  moving  in test idx: {moving_idx_in_test.tolist()}')
+print(f'  static  in test idx: {static_idx_in_test.tolist()}')
+print(f'  union (for inference): {len(all_idx_in_test)} unique samples')
+
+# Build mapping from "test-set index" -> "row in our inference array"
+test2row = {int(t): r for r, t in enumerate(all_idx_in_test)}
+
+# Frame centers + subjects for the union, in inference-array order
+sel_frame_centers = test_centers[all_idx_in_test]
+sel_subjects      = test_subjects[all_idx_in_test]
+
+# Inputs each method might need (for the union)
+hist_com    = np.stack([com_gt[t - HISTORY + 1 : t + 1] for t in sel_frame_centers], axis=0)        # (n_union, 100, 3)
 hist_kp     = np.stack([kp_gt_mm[t - HISTORY + 1 : t + 1].reshape(HISTORY, KP_DIM)
-                        for t in sel_frame_centers], axis=0)                                         # (5, 100, 63)
-future_true = np.stack([com_gt[t + 1 : t + 1 + HORIZON] for t in sel_frame_centers], axis=0)        # (5, 10, 3)
-ref_now     = com_gt[sel_frame_centers]                                                              # (5, 3)
+                        for t in sel_frame_centers], axis=0)                                          # (n_union, 100, 63)
+future_true = np.stack([com_gt[t + 1 : t + 1 + HORIZON] for t in sel_frame_centers], axis=0)         # (n_union, 10, 3)
+ref_now     = com_gt[sel_frame_centers]                                                               # (n_union, 3)
 
 
 # ---------------------------------------------------------------------------
@@ -278,8 +309,9 @@ def stats_tactile(tactile_all):
 predictions = {}
 
 # 1. Persistence
+n_union = ref_now.shape[0]
 predictions['persistence'] = np.broadcast_to(ref_now[:, None, :],
-                                             (N_SAMPLES_TO_PLOT, HORIZON, 3)).copy()
+                                             (n_union, HORIZON, 3)).copy()
 print('persistence:        ready')
 
 # 2. Phase 1 GRU
@@ -381,52 +413,89 @@ method_styles = {
 
 t_h = np.arange(-HISTORY + 1, 1)
 t_f = np.arange(1, HORIZON + 1)
-fig, axes = plt.subplots(N_SAMPLES_TO_PLOT, 3, figsize=(15, 3.6 * N_SAMPLES_TO_PLOT))
-for r in range(N_SAMPLES_TO_PLOT):
-    for c, ax_name in enumerate('xyz'):
-        ax = axes[r, c]
-        first = (r == 0 and c == 0)
-        ax.plot(t_h, hist_com[r, :, c], color='lightgray', alpha=0.9,
-                label='history' if first else None)
-        ax.plot(t_f, future_true[r, :, c], 'k-', linewidth=2.2,
-                label='truth' if first else None)
-        for name, pred in predictions.items():
-            style = method_styles.get(name, {})
-            ax.plot(t_f, pred[r, :, c],
-                    label=(name if first else None), **style)
-        ax.axvline(0, color='gray', linestyle=':', alpha=0.5)
-        if r == N_SAMPLES_TO_PLOT - 1:
-            ax.set_xlabel('frame (relative to t)')
-        if c == 0:
-            ax.set_ylabel(f'{ax_name} (mm)')
-        ax.set_title(
-            f'sample {sel_idx_in_test[r]} | subj {sel_subjects[r]} | t={sel_frame_centers[r]} | {ax_name}',
-            fontsize=9
-        )
-        if first:
-            ax.legend(fontsize='x-small', loc='best')
 
-plt.tight_layout()
-out_png = os.path.join(_COMPARE, 'example_trajectories.png')
-plt.savefig(out_png, dpi=100)
-plt.close()
-print(f'\nSaved plot: {out_png}')
+
+def render_plot(subset_idx_in_test, subset_label, filename, subtitle=''):
+    """Render a 5x3 grid of trajectory plots for the given subset selection.
+
+    subset_idx_in_test : indices INTO test_centers (i.e. positions in the full
+                          5,255-sample test set). We translate them to rows in
+                          our inference array via test2row.
+    """
+    n_samples = len(subset_idx_in_test)
+    inference_rows = [test2row[int(t)] for t in subset_idx_in_test]
+    fig, axes = plt.subplots(n_samples, 3, figsize=(15, 3.6 * n_samples))
+    if n_samples == 1:
+        axes = axes[None, :]                                    # keep 2-D indexing safe
+    for r, row in enumerate(inference_rows):
+        for c, ax_name in enumerate('xyz'):
+            ax = axes[r, c]
+            first = (r == 0 and c == 0)
+            ax.plot(t_h, hist_com[row, :, c], color='lightgray', alpha=0.9,
+                    label='history' if first else None)
+            ax.plot(t_f, future_true[row, :, c], 'k-', linewidth=2.2,
+                    label='truth' if first else None)
+            for name, pred in predictions.items():
+                style = method_styles.get(name, {})
+                ax.plot(t_f, pred[row, :, c],
+                        label=(name if first else None), **style)
+            ax.axvline(0, color='gray', linestyle=':', alpha=0.5)
+            if r == n_samples - 1:
+                ax.set_xlabel('frame (relative to t)')
+            if c == 0:
+                ax.set_ylabel(f'{ax_name} (mm)')
+            i_test = int(subset_idx_in_test[r])
+            ax.set_title(
+                f'[{subset_label}] test idx {i_test} | subj {test_subjects[i_test]} | '
+                f't={int(test_centers[i_test])} | {ax_name}',
+                fontsize=9
+            )
+            if first:
+                ax.legend(fontsize='x-small', loc='best')
+    if subtitle:
+        fig.suptitle(subtitle, fontsize=11, y=1.0)
+    plt.tight_layout()
+    out_png = os.path.join(_COMPARE, filename)
+    plt.savefig(out_png, dpi=100, bbox_inches='tight')
+    plt.close()
+    print(f'  saved {out_png}')
+
+
+print('\nRendering trajectory comparison plots...')
+render_plot(random_idx_in_test, 'random', 'example_trajectories.png',
+            subtitle='5 random test samples (any motion regime)')
+render_plot(moving_idx_in_test, 'moving', 'example_trajectories_moving.png',
+            subtitle=f'5 random samples from MOVING subset (future-window peak xy speed > {motion_thresh:.1f} mm/frame)')
+render_plot(static_idx_in_test, 'static', 'example_trajectories_static.png',
+            subtitle=f'5 random samples from STATIC subset (future-window peak xy speed <= {motion_thresh:.1f} mm/frame)')
+
 
 # ---------------------------------------------------------------------------
-# Metadata sidecar so the user can correlate the figure back to indices
+# Metadata sidecar so the user can correlate each figure back to its indices
 # ---------------------------------------------------------------------------
+
+def _meta_for(idxs):
+    return {
+        'sample_indices_in_test':  [int(i) for i in idxs],
+        'sample_frame_centers':    [int(test_centers[int(i)]) for i in idxs],
+        'sample_subjects':         [str(test_subjects[int(i)]) for i in idxs],
+        'peak_xy_speed_mm_frame':  [float(v_future[int(i)]) for i in idxs],
+    }
 
 meta = {
     'seed':                  SEED,
-    'n_samples_plotted':     N_SAMPLES_TO_PLOT,
+    'n_samples_per_subset':  N_SAMPLES_TO_PLOT,
     'methods_plotted':       list(predictions.keys()),
-    'sample_indices_in_test': sel_idx_in_test.tolist(),
-    'sample_frame_centers':   sel_frame_centers.tolist(),
-    'sample_subjects':        sel_subjects.tolist(),
+    'moving_threshold_mm_per_frame': motion_thresh,
+    'subsets': {
+        'random': _meta_for(random_idx_in_test),
+        'moving': _meta_for(moving_idx_in_test),
+        'static': _meta_for(static_idx_in_test),
+    },
 }
 out_meta = os.path.join(_COMPARE, 'metadata.json')
 with open(out_meta, 'w') as f:
     json.dump(meta, f, indent=2)
-print(f'Saved metadata: {out_meta}')
+print(f'\nSaved metadata: {out_meta}')
 
-print(f'\nDone. Methods on plot: {len(predictions)}.')
+print(f'\nDone. Methods on plots: {len(predictions)}.')

@@ -1960,3 +1960,50 @@ Under `train/com/output/phase2_gamma/`:
 3. Update `high_motion_subset.py` to auto-include `phase2_gamma` once its checkpoint exists, so the final headline plot picks it up automatically.
 
 If approved, the implementation is one writing session. The training run is one overnight qsub.
+
+---
+
+### Slide-deck plan (2026-06-08, lab-meeting style)
+
+User requested an HTML slide deck summarizing the entire CoM forecasting line of work. Eight design decisions resolved before any code:
+
+| decision | choice |
+|---|---|
+| gamma timing | proceed now with placeholder; fill γ section after the running qsub job (1029582) lands |
+| audience | lab meeting / advisor / project review (~10-15 slides, technical OK) |
+| framework | reveal.js (single self-contained HTML, CDN-loaded) |
+| compare_trajectories scope | two-page figure: 5 random from MOVING + 5 random from STATIC |
+| pipeline diagram | matplotlib-generated, lives in `docs/slides/figures/` |
+| speaker notes | yes — embedded per slide for the lab presentation |
+| slide location | `docs/slides/index.html` |
+| include failures | yes — CoP pivot, ablation null result, tactile underperformance |
+
+#### Build sequence (8 steps; tracked in TodoWrite)
+
+1. **Log the plan in SESSION_LOG.md** *(this section).*
+2. **Modify `train/com/compare_trajectories.py`** so it generates THREE plots in one run: the existing random-sample plot (unchanged for backwards compatibility), plus `example_trajectories_moving.png` and `example_trajectories_static.png`. Same SEED=42; sample indices recorded in `metadata.json`.
+3. **Smoke-test compare_trajectories on the laptop** (4 of 6 methods will load; tactile variants skip since cache lives on CRC). Confirms the new plots render without errors.
+4. **Write `docs/slides/figures/make_pipeline_diagram.py`** — matplotlib script that draws the project pipeline as a boxes-and-arrows figure: `tactile (96x96) → frozen CNN → 21 keypoints → CoM (Winter segmental) → forecaster (history+input) → future CoM (10 frames)`. Output: `pipeline.png`.
+5. **Run it locally** to confirm the diagram is legible.
+6. **Create `docs/slides/index.html`** — reveal.js skeleton: CDN-loaded reveal.js, single HTML file, `<aside class="notes">` blocks for speaker notes, image embeds from `../../train/com/output/...` and `figures/pipeline.png`.
+7. **Fill the slide content** (proposed 14 slides + appendix):
+   1. Title — *Forecasting Center of Mass from Tactile Carpet*
+   2. Motivation — *Why predict CoM 1 s ahead?*
+   3. Pipeline — the diagram from step 5
+   4. Data — *singlePerson_test, 10 subjects, ~32k frames, 17,218 forecasting samples, 70/30 chronological split*
+   5. Why GRU — brief explanation of the recurrent mechanism + why we picked it over MLP/LSTM/Transformer
+   6. Experimental design — table of all methods (persistence, Phase 1 GRU, v1, v2, β-50/200, ablation A1/A2/A3, γ)
+   7. Phase 1 + Phase 2 v1/v2 — headline numbers, why v2 won (synergy of three changes)
+   8. The ablation — *NONE of the three changes alone works* (one of the most informative slides)
+   9. β tactile — *tactile alone underperforms even Phase 1; encoder is the bottleneck*
+   10. CoP pivot (failed) — *we considered changing the target; persistence-on-CoP is 2.5 mm; pivot killed; CoP survives as motion-detection tool*
+   11. High-motion subset re-eval — *the methodological pivot*; full-set numbers were misleading; honest metric is moving-subset median
+   12. Compare trajectories on moving + static — qualitative visual evidence
+   13. γ fusion — *the binary scientific test*; placeholder for results pending the qsub job
+   14. Conclusions + next steps — *what we learned + ranked next-step plan*
+   - Appendix slides as needed (per-axis breakdowns, per-subject medians, GRU equations, dataset details).
+8. **Verify the deck renders in a local browser** — open `docs/slides/index.html`; check that all images load, speaker notes appear under `s`, navigation works.
+
+#### After the deck skeleton exists
+
+Once γ lands on CRC and is pulled back, a 5-10 minute pass to fill slide 13's placeholder with the actual numbers + the decision-hint line. No structural changes; just data.

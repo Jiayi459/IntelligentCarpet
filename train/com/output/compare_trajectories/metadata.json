@@ -1,33 +1,103 @@
 {
   "seed": 42,
-  "n_samples_plotted": 5,
+  "n_samples_per_subset": 5,
   "methods_plotted": [
     "persistence",
     "phase1_gru_com",
     "phase2_v1_gru_kp",
-    "phase2_v2_gru_kp",
-    "phase2_tactile_50ep",
-    "phase2_tactile_200ep"
+    "phase2_v2_gru_kp"
   ],
-  "sample_indices_in_test": [
-    4064,
-    2305,
-    3438,
-    468,
-    2275
-  ],
-  "sample_frame_centers": [
-    25679,
-    17563,
-    25053,
-    3385,
-    17189
-  ],
-  "sample_subjects": [
-    "YiyueLuo",
-    "TongZhang",
-    "YiyueLuo",
-    "MantianXue",
-    "TongZhang"
-  ]
+  "moving_threshold_mm_per_frame": 40.10069406461301,
+  "subsets": {
+    "random": {
+      "sample_indices_in_test": [
+        4064,
+        2305,
+        3438,
+        468,
+        2275
+      ],
+      "sample_frame_centers": [
+        25679,
+        17563,
+        25053,
+        3385,
+        17189
+      ],
+      "sample_subjects": [
+        "YiyueLuo",
+        "TongZhang",
+        "YiyueLuo",
+        "MantianXue",
+        "TongZhang"
+      ],
+      "peak_xy_speed_mm_frame": [
+        15.589580267764617,
+        84.00417727286728,
+        40.93041931387569,
+        22.022190472465788,
+        12.581254633450857
+      ]
+    },
+    "moving": {
+      "sample_indices_in_test": [
+        5122,
+        392,
+        2051,
+        3956,
+        3455
+      ],
+      "sample_frame_centers": [
+        31769,
+        2965,
+        15589,
+        25571,
+        25070
+      ],
+      "sample_subjects": [
+        "ZeyuWu",
+        "MantianXue",
+        "TongZhang",
+        "YiyueLuo",
+        "YiyueLuo"
+      ],
+      "peak_xy_speed_mm_frame": [
+        87.03468495889136,
+        68.27826776524424,
+        66.42244864339622,
+        44.903012806525524,
+        40.87432117811946
+      ]
+    },
+    "static": {
+      "sample_indices_in_test": [
+        2940,
+        4350,
+        2703,
+        2238,
+        1225
+      ],
+      "sample_frame_centers": [
+        24555,
+        26697,
+        20586,
+        16980,
+        9372
+      ],
+      "sample_subjects": [
+        "YiyueLuo",
+        "YiyueLuo",
+        "WanShou",
+        "TongZhang",
+        "PingchuanMa"
+      ],
+      "peak_xy_speed_mm_frame": [
+        25.352429280745174,
+        11.373660907996946,
+        24.09287641494014,
+        8.077926656480452,
+        20.376245567986164
+      ]
+    }
+  }
 }

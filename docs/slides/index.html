@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Forecasting Center of Mass from Tactile Carpet</title>
+
+<!-- reveal.js core + theme via CDN (self-contained, no install required) -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reset.css" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/white.css" id="theme" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/monokai.css" />
+
+<style>
+  .reveal h1, .reveal h2, .reveal h3 { text-transform: none; letter-spacing: 0; font-weight: 600; }
+  .reveal h1 { font-size: 2.0em; }
+  .reveal h2 { font-size: 1.6em; color: #1f2937; }
+  .reveal h3 { font-size: 1.25em; color: #374151; }
+  .reveal p, .reveal li { color: #1f2937; }
+  .reveal .small { font-size: 0.7em; }
+  .reveal .tiny { font-size: 0.55em; }
+  .reveal .muted { color: #6b7280; }
+  .reveal .accent { color: #b91c1c; }
+  .reveal .good { color: #047857; }
+  .reveal table { font-size: 0.65em; margin: 0 auto; border-collapse: collapse; }
+  .reveal table th, .reveal table td { padding: 6px 12px; border-bottom: 1px solid #e5e7eb; text-align: right; }
+  .reveal table th:first-child, .reveal table td:first-child { text-align: left; }
+  .reveal table th { background: #f3f4f6; font-weight: 600; }
+  .reveal table tr.highlight { background: #fef3c7; font-weight: 600; }
+  .reveal table tr.headline { background: #d1fae5; font-weight: 600; }
+  .reveal table tr.bad { background: #fee2e2; }
+  .reveal .columns { display: flex; gap: 1.5em; align-items: center; }
+  .reveal .col { flex: 1; }
+  .reveal img.fullwidth { max-height: 70vh; max-width: 95%; }
+  .reveal pre.code { font-size: 0.55em; }
+  .reveal aside.notes { font-size: 0.8em; }
+  .reveal section { text-align: left; }
+  .reveal section.title-slide { text-align: center; }
+  .reveal section.title-slide h1 { font-size: 2.2em; }
+  .reveal .footer-note { position: absolute; bottom: 10px; right: 20px; font-size: 0.45em; color: #9ca3af; }
+  .reveal .columns { display: flex; gap: 1.5em; align-items: flex-start; }   /* top-align, not center-align, so tall columns don't push short ones */
+  .reveal .note-box { background: #f3f4f6; border-left: 3px solid #6366f1; padding: 0.5em 0.8em; margin: 0.5em 0; font-size: 0.65em; }
+</style>
+</head>
+<body>
+
+<div class="reveal">
+<div class="slides">
+
+<!-- ============================================================ -->
+<!-- 1. TITLE                                                     -->
+<!-- ============================================================ -->
+<section class="title-slide">
+  <h1>Forecasting Center of Mass<br/>from a Tactile Carpet</h1>
+  <p class="muted"> 1-second-ahead body-CoM prediction study using the <em>IntelligentCarpet</em> dataset</p>
+  <p class="small muted">Jiayi &middot; lab review</p>
+  <aside class="notes">
+    Goal of the talk: walk through what we tried for forecasting CoM one second ahead from
+    tactile signals, what worked, what didn't, and where the project stands today. I'll be
+    intellectually honest about failures because some of them are actually the most informative
+    findings. ~15 slides, ~20 minutes if I don't dwell too long on any one result.
+  </aside>
+</section>
+
+<!-- ============================================================ -->
+<!-- 2. MOTIVATION                                                -->
+<!-- ============================================================ -->
+<section>
+  <h2>Why predict CoM 1 s ahead?</h2>
+  <ul>
+    <li><b>Why CoM:</b> the body's center of mass is the primary balance-relevant variable; clinically used in fall-risk and gait analysis.</li>
+    <li><b>Why 1 s ahead:</b> short-horizon kinematic prediction sits at the edge of what pose history alone can do. Long enough that learned dynamics matter; short enough that the task is tractable.</li>
+    <li><b>Why tactile carpet:</b> physically the ground-reaction force <em>precedes</em> CoM displacement. A pressure sensor sees the "weight is about to shift toward the heels" cue before the body actually moves.</li>
+    <li><b>Central scientific question:</b> does tactile data add forecast-relevant information <em>on top of</em> what camera-derived pose history already provides?</li>
+  </ul>
+  <aside class="notes">
+    Frame the motivation in two halves: clinical / applied (CoM matters for balance) and
+    scientific (does tactile contribute information that vision doesn't already?). Both are
+    project hooks. The "tactile precedes CoM" mechanistic argument is the strongest a-priori
+    reason to think this is even a tractable question.
+  </aside>
+</section>
+
+<!-- ============================================================ -->
+<!-- 3. PIPELINE                                                  -->
+<!-- ============================================================ -->
+<section>
+  <h2>Pipeline overview</h2>
+  <img src="figures/pipeline.png" alt="pipeline diagram" class="fullwidth" />
+  <p class="small muted" style="margin-top: 0.5em;">
+    Two parallel paths produce CoM. Camera-derived CoM is supervision; tactile-derived CoM is
+    one of the inputs we test. Forecaster predicts 10 future frames (1 s at 10 Hz).
+  </p>
+  <div class="note-box">
+    <b>Two CNNs in this project &mdash; don't confuse them:</b>
+    <ul style="margin: 0.3em 0;">
+      <li><b>The original IntelligentCarpet CNN</b> (<code>tile2openpose_conv3d</code>, frozen) &mdash; pretrained, used only on the top row of the diagram to map tactile &rarr; 21 keypoints &rarr; CoM_pred. We don't retrain it.</li>
+      <li><b>The forecaster's tactile encoder</b> (used by &beta; and &gamma;) &mdash; a NEW, much smaller CNN (3 conv layers + AdaptiveAvgPool + Linear &rarr; 128-d feature) trained from scratch as part of the forecaster. Not part of the original IntelligentCarpet codebase.</li>
+    </ul>
+  </div>
+  <aside class="notes">
+    Key things to point out: (1) camera path is what gives us ground truth; (2) tactile path
+    on top is what we'd use at deployment if the project succeeds, but we don't use the CNN's
+    keypoint output as an input to the forecaster -- only its existence/noise-floor matters;
+    (3) the forecaster's tactile encoder is a separate, smaller CNN we trained from scratch.
+    Audience often conflates the two -- the note box prevents that confusion explicitly.
+  </aside>
+</section>
+
+<!-- ============================================================ -->
+<!-- 4. DATA                                                      -->
+<!-- ============================================================ -->
+<section>
+  <h2>Data</h2>
+  <ul>
+    <li><b>Source:</b> IntelligentCarpet "singlePerson_test" demo (~22 GB extracted)</li>
+    <li><b>32,802 frames</b> across 135 sessions, 10 subjects, 3 recording days, 10 Hz sampling.</li>
+    <li>Per frame: <span class="small">96 &times; 96 tactile pressure map + GT 21-keypoint 3D pose + GT 3D Gaussian heatmap.</span></li>
+    <li>Coordinates: carpet xy in [-100, 1800] mm; z height with floor at 0 and body at negative values.</li>
+    <li><b>Forecasting samples:</b> 17,218 (10-s history + 1-s future) after edge + outlier filtering.</li>
+    <li><b>Split:</b> per-session 70 % train / 30 % test, <em>chronological</em>.</li>
+  </ul>
+  <div class="note-box"><b>What "chronological" means:</b> within each session we take the first 70 % of frames in time order for training and the last 30 % for test. We do <em>not</em> shuffle frames across the boundary &mdash; the test set is always a strict <em>future</em> relative to the train set. This prevents the train and test windows from overlapping (a window contains 110 consecutive frames), and matches the deployment scenario where a model trained on past data predicts future data.</div>
+  <aside class="notes">
+    Three things to stress: (a) we have 10 subjects but split chronologically, so this isn't a
+    cross-subject generalization study; (b) all "ground truth" CoM comes from camera-OpenPose,
+    which itself has ~71 mm estimation noise we can never get under; (c) the 17 k forecasting
+    samples is what survives after dropping windows that contain OpenPose triangulation
+    failures.
+  </aside>
+</section>
+
+<!-- ============================================================ -->
+<!-- 5. WHY GRU                                                   -->
+<!-- ============================================================ -->
+<section>
+  <h2>What is a GRU?</h2>
+  <p><b>GRU (Gated Recurrent Unit)</b> &mdash; a recurrent neural network designed for sequence modeling.</p>
+  <p>A GRU processes a sequence <em>one frame at a time</em>, maintaining a hidden state vector that summarizes everything seen so far. At each step, two learnable <em>gates</em> decide:</p>
+  <ul>
+    <li><b>Update gate</b> &mdash; how much of the new input should overwrite the hidden state?</li>
+    <li><b>Reset gate</b> &mdash; how much of the previous hidden state should be forgotten before computing the new candidate?</li>
+  </ul>
+  <p>After all 100 history frames are processed, the <b>final hidden state</b> is a compressed summary of the trajectory dynamics. A linear head reads out the next 10 frames of CoM.</p>
+  <div class="note-box">
+    The two gates are what make the GRU learn <em>what to remember vs forget</em> automatically. Without them, the hidden state would either overwrite itself completely each step (no memory) or barely update at all (no learning).
+  </div>
+  <aside class="notes">
+    GRU is the trajectory-forecasting standard. Mechanism-level description is what audience
+    needs to understand the rest of the slides -- they don't need to read the equations, just
+    to know "there's a hidden state, gates decide what to update, final state -> linear head
+    -> output." If asked "why not Transformer or LSTM," answer: small dataset + RNN family
+    works better at our scale; GRU has fewer params than LSTM for the same job.
+  </aside>
+</section>
+
+<!-- ============================================================ -->
+<!-- 6. EXPERIMENTAL DESIGN                                       -->
+<!-- ============================================================ -->
+<section>
+  <h2>Experimental design</h2>
+  <p class="small muted">All forecasters predict CoM(t+1 : t+10) (10 future frames = 1 s). Same train/test split, same loss family, same evaluation metric.</p>
+  <div class="note-box">
+    <b>GRU notation used below:</b>
+    <ul style="margin: 0.3em 0;">
+      <li><code>GRU(63 &rarr; 256)</code> &mdash; input dim is 63 (per frame), hidden state vector is 256 numbers wide. Bigger hidden = more capacity to remember subtle history features.</li>
+      <li><code>2 L</code> &mdash; <b>2 layers</b> stacked. Second layer takes the first layer's output as its input. Lets the model build more abstract temporal features.</li>
+      <li><code>dropout</code> &mdash; randomly zero out 10 % of inter-layer connections during training. Regularization &mdash; helps the model not memorize the training set.</li>
+    </ul>
+  </div>
+  <table>
+    <tr><th>method</th><th>input modality</th><th>architecture</th><th>params</th></tr>
+    <tr><td>persistence</td><td>none</td><td>closed-form (predict no change)</td><td class="muted">0</td></tr>
+    <tr><td>linear / const-velocity</td><td>CoM history</td><td>closed-form</td><td class="muted">0</td></tr>
+    <tr><td>Phase 1 GRU</td><td>3-d CoM history</td><td>GRU, 1 layer</td><td>15 k</td></tr>
+    <tr><td>Phase 2 v1 (kp)</td><td>63-d keypoint history</td><td>GRU, 1 layer</td><td>27 k</td></tr>
+    <tr class="headline"><td>Phase 2 v2 (kp, strong)</td><td>63-d keypoint history</td><td>GRU, 2 layers, <b>delta target</b></td><td>649 k</td></tr>
+    <tr><td>Phase 2 ablation A1/A2/A3</td><td>63-d kp history</td><td>v1 + one change at a time</td><td>27&ndash;650 k</td></tr>
+    <tr><td>Phase 2 &beta; tactile (50ep, 200ep)</td><td>100 &times; 96 &times; 96 tactile</td><td>CNN + GRU</td><td>150 k</td></tr>
+    <tr><td>Phase 2 &gamma; fusion</td><td>tactile + CoM history</td><td>two-branch late fusion</td><td>283 k</td></tr>
+  </table>
+  <p class="small muted" style="text-align: center; margin-top: 0.5em;">Greek labels are Phase 2 input-modality variants: &beta; (tactile only), &gamma; (fused), &delta; (= "v1/v2", keypoint only).</p>
+  <aside class="notes">
+    The headline row (highlighted green) is Phase 2 v2 -- the first method to beat persistence
+    on the full set. The note-box at top explains the GRU notation so audience can read the
+    architecture column. Greek labels come from the original Phase 2 plan; they're just
+    variant names for "what does the input look like."
+  </aside>
+</section>
+
+<!-- ============================================================ -->
+<!-- 7. HEADLINE RESULTS + V2 WINS                                -->
+<!-- ============================================================ -->
+<section>
+  <h2>Headline numbers (1-s horizon)</h2>
+  <p class="small">Median 3D Euclidean error in mm. Lower is better. Skill = method median / persistence median; &lt; 1.0 means beats persistence.</p>
+  <table>
+    <tr><th>method</th><th>FULL median</th><th>STATIC median</th><th>MOVING median</th><th>skill @ MOVING</th></tr>
+    <tr><td>persistence</td><td>54</td><td>38</td><td>133</td><td>1.000</td></tr>
+    <tr><td>Phase 1 GRU (CoM only)</td><td>61</td><td>51</td><td>105</td><td>0.786</td></tr>
+    <tr><td>Phase 2 v1 (kp, weak)</td><td>66</td><td>57</td><td>96</td><td>0.721</td></tr>
+    <tr class="headline"><td><b>Phase 2 v2 (kp, strong)</b></td><td><b>47</b></td><td><b>37</b></td><td><b>91</b></td><td><b>0.684</b></td></tr>
+    <tr><td>&beta; tactile 50 ep</td><td>64</td><td>51</td><td>114</td><td>0.860</td></tr>
+    <tr><td>&beta; tactile 200 ep</td><td>58</td><td>46</td><td>111</td><td>0.837</td></tr>
+    <tr><td><b>&gamma; fusion (tactile + CoM)</b></td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td><span class="muted">(training)</span></td></tr>
+  </table>
+  <p class="small" style="margin-top: 0.7em;"><span class="accent">Phase 2 v2</span> is the strongest forecaster across every subset. The v2 win required <em>three</em> simultaneous changes from v1: bigger architecture + delta target + 200 epochs with best-val checkpointing.</p>
+  <aside class="notes">
+    Three things to emphasize: (1) the spread between methods is huge on the moving subset
+    and tiny on the static subset -- that gap will be the next slide's point. (2) v2 wins
+    everywhere. (3) gamma's row is empty because it's still training on CRC -- the deck has a
+    placeholder slide for it.
+  </aside>
+</section>
+
+<!-- ============================================================ -->
+<!-- 8. ABLATION FINDING                                          -->
+<!-- ============================================================ -->
+<section>
+  <h2>Ablation: which v2 change carries the gain?</h2>
+  <div class="columns">
+    <div class="col">
+      <table class="small">
+        <tr><th>variant</th><th>median (FULL)</th><th>vs v1</th></tr>
+        <tr><td>v1 (small / abs / 50 ep)</td><td>66</td><td>baseline</td></tr>
+        <tr><td>A1 &mdash; delta only</td><td>65</td><td class="muted">&minus;1</td></tr>
+        <tr><td>A2 &mdash; bigger only</td><td>68</td><td class="accent">+2 worse</td></tr>
+        <tr><td>A3 &mdash; longer only</td><td>69</td><td class="accent">+3 worse</td></tr>
+        <tr class="headline"><td><b>v2 &mdash; all three</b></td><td><b>47</b></td><td class="good"><b>&minus;19</b></td></tr>
+      </table>
+    </div>
+    <div class="col">
+      <p><b>Finding:</b> none of the three changes alone closes the gap. The v2 win is a <span class="accent">synergy</span> of all three.</p>
+      <p class="small">A1 (delta target alone) closed only 1 mm of the 19 mm gap. A2 and A3 alone <em>hurt</em> &mdash; end-of-training selection penalizes the bigger / longer-trained models because they overfit before they converge.</p>
+      <p class="small muted"><b>Implication:</b> no cheap recipe transfer from keypoints to tactile. The "synergy" recipe (delta + capacity + long training + best-val) must be applied jointly, not piecemeal.</p>
+      <div class="note-box">
+        <b>What "delta target" means:</b> v1 predicts the <em>absolute</em> future CoM position (e.g. "person is at xyz = (1100, 800, &minus;900) mm 1 s from now"). A1/v2 instead predict the <em>change</em> from the current CoM: &Delta; = CoM(t+h) &minus; CoM(t). At eval, we recover absolute prediction by adding CoM(t) back. Smaller, better-conditioned regression target &mdash; the model only has to learn motion, not absolute position.
+      </div>
+    </div>
+  </div>
+  <aside class="notes">
+    My pre-run prediction was wrong: I expected delta-target alone would carry most of the
+    gain. The actual result is more interesting -- the three changes are co-required. This
+    matters for tactile: we can't just take v2's recipe and apply one piece to tactile.
+    Worth a moment of "scientific surprise" framing -- this is the kind of finding that's
+    only visible when you ablate.
+  </aside>
+</section>
+
+<!-- ============================================================ -->
+<!-- CoP PIVOT (FAILED)                                           -->
+<!-- ============================================================ -->
+<section>
+  <h2>The CoP pivot &mdash; failed, but informative</h2>
+  <p class="small muted">2024-2025 literature consensus: tactile/pressure-sensor research targets <em>Center of Pressure (CoP)</em>, not CoM. CoP is the centroid of measured pressure &mdash; no camera dependency. We asked: should we pivot the target?</p>
+  <div class="columns">
+    <div class="col" style="flex: 0.85;">
+      <table class="small">
+        <tr><th>persistence target</th><th>1-s median (mm)</th><th>verdict</th></tr>
+        <tr><td>CoM 3-D</td><td>54</td><td>baseline (xyz)</td></tr>
+        <tr><td>CoM xy 2-D</td><td>65</td><td>2D projection</td></tr>
+        <tr class="bad"><td><b>CoP 2-D</b></td><td><b>2.5</b></td><td><b>too small</b></td></tr>
+      </table>
+      <div class="note-box" style="margin-top: 0.5em;">
+        <b>CoM 3D vs CoM xy 2D:</b> CoM 3D measures error using all three axes (x, y, z) &mdash; the Euclidean distance between predicted and true 3D position. CoM xy 2D drops the z (height) axis and measures only horizontal error. The two are reported side-by-side so CoP (which is inherently 2D &mdash; a centroid on the carpet plane) can be compared apples-to-apples against CoM xy 2D, not against CoM 3D which has the extra z component inflating it.
+      </div>
+    </div>
+    <div class="col">
+      <img src="../../train/com/output/cop_persistence.png" alt="CoP persistence baseline plot" style="width: 100%;" />
+      <p class="small muted" style="text-align: center; margin-top: 0.3em;">CoP (blue) is essentially flat across horizons; CoM xy 2D (orange) and CoM 3D (green) climb steeply.</p>
+    </div>
+  </div>
+  <p class="small good" style="margin-top: 0.5em;"><b>Direction killed</b> &mdash; CoP barely moves (feet stay planted). <b>Salvage:</b> CoP velocity is the cleanest motion detector. Used to partition the test set in the next slide.</p>
+  <aside class="notes">
+    Two things to point at on the right-hand plot: (1) the blue line for CoP is essentially
+    flat at ~2-3 mm regardless of horizon -- there's no headroom for a forecaster to add
+    value; (2) the green line (CoM 3D) is consistently above the orange line (CoM xy 2D)
+    because the z error component is additive in Euclidean distance, even when z barely moves.
+  </aside>
+</section>
+
+<!-- ============================================================ -->
+<!-- 11. HIGH-MOTION SUBSET                                       -->
+<!-- ============================================================ -->
+<section>
+  <h2>The story flips on the moving subset</h2>
+  <p class="small">Partition the 5,255 test samples by peak future-window xy speed (top 30 % = moving).</p>
+  <table>
+    <tr><th>method</th><th>FULL</th><th>STATIC (70 %)</th><th>MOVING (30 %)</th></tr>
+    <tr><td>persistence</td><td>54</td><td>38</td><td class="accent"><b>133</b></td></tr>
+    <tr><td>Phase 1 GRU</td><td>61</td><td>51</td><td class="good">105</td></tr>
+    <tr><td>Phase 2 v2 (kp)</td><td><b>47</b></td><td><b>37</b></td><td class="good"><b>91</b></td></tr>
+    <tr><td>&beta; tactile 200 ep</td><td>58</td><td>46</td><td class="good">111</td></tr>
+  </table>
+  <p style="margin-top: 0.8em;"><b><span class="good">Every learned method beats persistence on the moving subset.</span></b> First clean positive forecasting result of the project.</p>
+  <p class="small">Persistence collapses 38 &rarr; 133 (3.5&times;) when motion is real. v2 grows only 2.5&times;. The full-set persistence-wins narrative was an <em>artifact of static-dominated test data</em>.</p>
+  <p class="small accent">For any honest writeup metric: <b>use the moving subset median</b>, not the full set.</p>
+  <aside class="notes">
+    This is the methodological pivot of the whole project. Before this analysis, "persistence
+    beats X" was the dominant finding -- and it was misleading. The full set is 70 % static
+    frames where forecasting is information-theoretically near-impossible (nothing to predict).
+    On those frames persistence wins by construction. The moving subset is where the actual
+    science happens.
+  </aside>
+</section>
+
+<!-- ============================================================ -->
+<!-- 12a. COMPARE TRAJECTORIES MOVING                             -->
+<!-- ============================================================ -->
+<section>
+  <h2>Qualitative: what do predictions look like on moving frames?</h2>
+  <img src="../../train/com/output/compare_trajectories/example_trajectories_moving.png"
+       alt="trajectory comparison on moving subset" class="fullwidth" />
+  <p class="small muted">5 random samples from the moving subset. Black = truth; red solid = Phase 2 v2 (strongest); other dashed lines = baselines and Phase 1.</p>
+  <aside class="notes">
+    Point at the per-axis panels and walk through one sample. Notice how methods diverge from
+    each other on these samples -- v2 (red) tracks the truth curvature, persistence (gray
+    dashed) just extrapolates a horizontal line. This is the visual evidence that the moving
+    subset actually has motion to forecast.
+  </aside>
+</section>
+
+<!-- ============================================================ -->
+<!-- 12b. COMPARE TRAJECTORIES STATIC                             -->
+<!-- ============================================================ -->
+<section>
+  <h2>Same view on static frames &mdash; methods collapse together</h2>
+  <img src="../../train/com/output/compare_trajectories/example_trajectories_static.png"
+       alt="trajectory comparison on static subset" class="fullwidth" />
+  <p class="small muted">5 random samples from the static subset. All methods look identical because the truth (black) is essentially flat &mdash; persistence wins by predicting "no change."</p>
+  <aside class="notes">
+    Direct visual contrast with the previous slide. On static frames, every method produces
+    nearly the same prediction (a near-horizontal line continuing the history). There's
+    nothing for a forecaster to learn. The two slides side-by-side justify why we report
+    moving-subset numbers as the honest metric.
+  </aside>
+</section>
+
+<!-- ============================================================ -->
+<!-- 13. γ FUSION (PLACEHOLDER)                                   -->
+<!-- ============================================================ -->
+<section>
+  <h2>&gamma; fusion: the binary scientific test (results pending)</h2>
+  <div class="columns">
+    <div class="col">
+      <p><b>Architecture</b> &mdash; two-branch late fusion:</p>
+      <ul class="small">
+        <li>Tactile branch: per-frame CNN &rarr; GRU(128 &rarr; 128)</li>
+        <li>CoM branch: GRU(3 &rarr; 64), same size as Phase 1</li>
+        <li>Concat &rarr; MLP &rarr; 10-frame delta CoM</li>
+        <li>283 k params; 200 ep + best-val</li>
+      </ul>
+      <p class="small"><b>The question:</b> does tactile add forecasting information <em>conditional on</em> already having CoM history?</p>
+    </div>
+    <div class="col">
+      <p><b>Three possible outcomes (MOVING subset):</b></p>
+      <table class="small">
+        <tr><th>&gamma; median</th><th>reading</th></tr>
+        <tr><td>&gt; 105 mm</td><td class="accent">tactile redundant given CoM &mdash; <b>thesis falsified</b></td></tr>
+        <tr><td>91 &lt; &gamma; &lt; 105</td><td>tactile contributes, less than camera-pose advantage</td></tr>
+        <tr><td>&lt; 91 mm</td><td class="good"><b>strong positive</b> &mdash; tactile carries info camera-pose doesn't</td></tr>
+      </table>
+      <p class="small muted">Job 1029582 running on CRC; results expected ~7 h after submission.</p>
+    </div>
+  </div>
+  <aside class="notes">
+    This is the experiment we're waiting on. The slide is intentionally structured around the
+    binary outcome so I can fill in the actual number and circle the right row when results
+    land. Important: gamma uses the SAME tactile encoder as beta, so this isn't testing "would
+    a better encoder help" -- it's specifically testing "does tactile information complement
+    CoM history."
+  </aside>
+</section>
+
+<!-- ============================================================ -->
+<!-- 14. CONCLUSIONS + NEXT                                       -->
+<!-- ============================================================ -->
+<section>
+  <h2>Conclusions + next steps</h2>
+  <p><b>What we learned</b></p>
+  <ul class="small">
+    <li><span class="good">Phase 2 v2 (camera pose history)</span> is the strongest forecaster &mdash; 47 mm full, 91 mm moving, beats persistence on every subset.</li>
+    <li>The v2 win is a <span class="accent">synergy</span> of three changes (delta target + capacity + long training + best-val). No single change suffices.</li>
+    <li>The <span class="good">high-motion subset re-evaluation</span> reveals that <em>every learned method beats persistence</em> on frames where motion actually occurs. The full-set numbers were misleading.</li>
+    <li><span class="accent">Tactile-only is below Phase 1</span> even on the moving subset &mdash; the CNN encoder is the bottleneck.</li>
+    <li>The CoP pivot taught us that the project's structural bottleneck is <em>data composition</em>, not target choice.</li>
+  </ul>
+  <p><b>What's next</b></p>
+  <ol class="small">
+    <li><b>&gamma; fusion result</b> &mdash; the binary answer to the central question. Job running on CRC; results pending.</li>
+  </ol>
+  <p><b>Open questions to discuss</b></p>
+  <ul class="small">
+    <li><b>Make the prediction task more specific?</b> &mdash; current target is generic "1-s-ahead CoM." More targeted formulations could be: forecast only at transition events (sit&harr;stand, gait initiation); forecast only the z component; predict reach/footfall events. These give tactile a narrower regime where its mechanism (GRF precedes CoM) is most informative.</li>
+    <li><b>Try other prediction methods?</b> &mdash; alternatives we haven't tried: Temporal Convolutional Network (TCN) instead of GRU; small Transformer with relative-position attention; physics-informed forecasters (constant-acceleration + learned residual); diffusion-based stochastic forecasters.</li>
+  </ul>
+  <aside class="notes">
+    Conclusion should leave space for discussion. Single "what's next" item is just gamma --
+    once we have that result we'll come back and replan. The two open questions are real --
+    we should solicit audience input on (a) whether to scope the prediction task more
+    narrowly and (b) whether GRU is the right backbone or worth swapping.
+  </aside>
+</section>
+
+<!-- ============================================================ -->
+<!-- APPENDIX                                                     -->
+<!-- ============================================================ -->
+<section>
+  <h2>Appendix</h2>
+  <p class="muted">Supporting plots and per-subject breakdowns.</p>
+  <aside class="notes">Skip unless asked.</aside>
+</section>
+
+<section>
+  <h3>Appendix A &mdash; Per-horizon error curves on moving subset</h3>
+  <img src="../../train/com/output/high_motion/error_vs_horizon_moving.png"
+       alt="per-horizon error on moving" class="fullwidth" />
+  <aside class="notes">
+    All learned methods curve concavely; persistence rises near-linearly. v2 sits at the
+    bottom at every horizon from 0.3 s onward. Tactile clusters with persistence in shape but
+    below in absolute value.
+  </aside>
+</section>
+
+<section>
+  <h3>Appendix B &mdash; Motion-criterion distribution</h3>
+  <img src="../../train/com/output/high_motion/motion_threshold_histogram.png"
+       alt="motion threshold histogram" class="fullwidth" />
+  <p class="small">Heavily right-skewed. Threshold (top 30 %) lands at 40.1 mm/frame &mdash; natural shoulder of the distribution.</p>
+</section>
+
+<section>
+  <h3>Appendix C &mdash; Phase 2 v2 ablation summary</h3>
+  <img src="../../train/com/output/phase2_ablation/ablation_summary.png"
+       alt="ablation summary bars" class="fullwidth" />
+</section>
+
+<section>
+  <h3>Appendix D &mdash; Project pointers</h3>
+  <ul class="small">
+    <li><b>Code:</b> github.com/Jiayi459/IntelligentCarpet &mdash; all forecasters under <code>train/com/</code></li>
+    <li><b>Session log:</b> <code>SESSION_LOG.md</code> &mdash; full record of every experiment, decision, and result</li>
+    <li><b>Key scripts:</b>
+      <ul class="tiny">
+        <li><code>compute_com.py</code> &mdash; segmental CoM from keypoints</li>
+        <li><code>compute_cop.py</code> &mdash; CoP from tactile + persistence baselines</li>
+        <li><code>train_phase1.py</code> &mdash; CoM-history GRU</li>
+        <li><code>train_phase2_keypoints[_v2].py</code> &mdash; oracle keypoint forecaster</li>
+        <li><code>train_phase2_tactile.py</code> &mdash; tactile-only forecaster</li>
+        <li><code>train_phase2_gamma.py</code> &mdash; tactile + CoM fusion forecaster</li>
+        <li><code>high_motion_subset.py</code> &mdash; static/moving re-evaluation</li>
+        <li><code>compare_trajectories.py</code> &mdash; visual prediction comparison</li>
+      </ul>
+    </li>
+  </ul>
+</section>
+
+</div> <!-- .slides -->
+</div> <!-- .reveal -->
+
+<!-- reveal.js + plugins via CDN -->
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+<script>
+  Reveal.initialize({
+    width: 1400,
+    height: 850,
+    margin: 0.04,
+    minScale: 0.2,
+    maxScale: 2.0,
+    hash: true,
+    slideNumber: 'c/t',
+    transition: 'slide',
+    plugins: [ RevealNotes, RevealHighlight ],
+  });
+</script>
+</body>
+</html>
