@@ -5,7 +5,9 @@
     "persistence",
     "phase1_gru_com",
     "phase2_v1_gru_kp",
-    "phase2_v2_gru_kp"
+    "phase2_v2_gru_kp",
+    "phase2_tactile_50ep",
+    "phase2_tactile_200ep"
   ],
   "moving_threshold_mm_per_frame": 40.10069406461301,
   "subsets": {
