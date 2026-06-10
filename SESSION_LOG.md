@@ -2396,6 +2396,139 @@ The 1.2 GB tactile cache lives ONLY on CRC. Confirmed with the user. Decision: k
 
 **Implication for the `--epochs-mae 1 --epochs-dynamics 1` smoke-train I suggested in the run guide earlier this session: it does NOT work on the laptop** (needs the cache). It only works on CRC, where there's no reason to use it — the laptop import smoke-test already covered the "does the code load and forward" question.
 
+---
+
+### ε first run lands — clean honest negative (2026-06-09)
+
+User ran ε end-to-end on CRC and pulled results back. The two probes appear "exactly the same" in user's reading — they are, and the reason matters.
+
+#### What the metrics say
+
+| metric | ε linear | ε MLP | persistence |
+|---|---:|---:|---:|
+| MOVING median 3D (mm) | 132.55 | 132.57 | 132.90 |
+| FULL  median 3D (mm)  |  54.19 |  54.13 |  54.14 |
+| STATIC median 3D (mm) |  38.49 |  38.29 |  38.07 |
+| skill vs persistence (MOVING) | 0.997 | 0.998 | 1.000 |
+
+Both probes are within ~0.5 mm of persistence at every horizon on every subset. Per-horizon medians on MOVING match persistence to within 1.5 mm at the worst point (5 s). This is the signature of **both probes converging to "predict ~zero standardized delta everywhere"** — which equals persistence.
+
+#### Why this happened — diagnosis from the training metrics
+
+`metrics.json` records the SSL stage's val loss:
+- `dynamics_best_val_mse: 0.937` (in standardized delta-tactile units)
+- `dynamics_epoch: 11` (out of 20)
+
+The dynamics target is standardized so "predict zero everywhere" baseline gives MSE ≈ 1.0. **0.937 means Stage 2 SSL did NOT meaningfully beat tactile-persistence.** Best val came at epoch 11/20, suggesting overfitting onset before the model could learn anything useful.
+
+The probe val MSEs (`linear: 1.011`, `mlp: 1.009`) are *above 1.0* — meaning both probes fit *worse than predict-zero* on val data. They're chasing noise in a 128-dim hidden state that doesn't carry CoM-forecasting signal.
+
+#### This is exactly OPEN QUESTION #8's failure mode
+
+Quoting the ε plan section from earlier this session:
+> If Stage 2's delta-tactile val loss never gets below the persistence floor → encoder+GRU learned nothing.
+
+The 6 % improvement from 1.0 → 0.937 is real but tiny, and 100 % of it was used to fit delta-tactile structure (raw pressure dynamics), not anything that transfers to CoM forecasting. The encoder+GRU optimum for "predict tactile change" is *not* the optimum for "summarize past 10 s in a way that predicts CoM" — and we have no mechanism in the current recipe to align them.
+
+#### Where this lands in the result regime table
+
+From the plan section:
+
+| ε MLP median (mm, MOVING) | Reading |
+|---|---|
+| ≥ 111 (β-200ep) | Encoder bottleneck story is **wrong**... significant rethink needed. |
+| 91 – 111 | Weak positive. |
+| 91 – 104 | Real positive. |
+| < 91 (v2) | Strong positive. |
+
+**ε MLP landed at 132.6 mm — worse than β-200ep's 111.2 mm, worse than every single learned method on the MOVING subset.** This is the worst result regime. The first-pass ε recipe failed.
+
+#### Probable causes, ranked
+
+1. **Training budget was too small.** 30+20 epochs for transformer SSL is tiny by SSL-literature standards (Sparsh uses far more). The < 2 h budget bought us a fast read but possibly too fast.
+2. **Mask ratio 75 % too aggressive for sparse tactile.** OPEN QUESTION #2 — we picked 75 % as "try the default first." For tactile where most patches are baseline pressure, masking 75 % of patches may leave the visible 9 patches uninformative. A 50 % mask might give the encoder enough signal to actually learn structure.
+3. **Stage 2's "predict delta-tactile" objective doesn't transfer to "predict delta-CoM."** Even if Stage 2 had succeeded at predicting raw tactile dynamics, that representation isn't necessarily aligned with CoM motion. A representation excellent at "where does pressure shift in the next 100 ms" isn't necessarily good at "where does the body's CoM go." Some of this is fundamental to the SSL→downstream gap.
+4. **Stage 1 MAE training only sees individual frames** (no temporal context). The encoder learns spatial structure but the GRU has to learn temporal dynamics from scratch in Stage 2 — possibly the binding agent that was missing.
+
+#### Decision
+
+User did NOT pre-commit to a specific next step (#7 acceptance and #8 fallback were deferred until results land). Now we have results. Options, ranked by my honest recommendation:
+
+| option | cost | what it tests |
+|---|---|---|
+| **A. Re-run with mask 50 % + more epochs** (Stage 1 to 60, Stage 2 to 40) | ~3-4 h on A10 | Whether the "too aggressive mask + too few epochs" hypothesis explains the negative |
+| B. Skip Stage 2 entirely: MAE pretrain → directly probe encoder mean-pooled features | ~1.5 h | Whether Stage 2 was actively harmful or just neutral |
+| C. Replace Stage 2 target with "predict future *mean-pooled features*" (JEPA-style) instead of pixels | ~3 h | Whether predicting in latent space (Sparsh's strongest variant) helps |
+| D. Add flatten baseline anyway as a sanity check | ~1.5 h | Whether the ViT structure even matters at the budget we have |
+| E. Declare ε dead at this recipe, write up negative result, move on | 0 h | Nothing — finalizes the writeup |
+
+**My recommendation: A** as the cheapest decisive test. If A also fails, then B or C is the cleanest next experiment. E (the honest writeup) is what we'd do if all retries fail — not the first move.
+
+Deferred to user decision when they're ready.
+
+---
+
+### compare_trajectories rewrite — 5-s consecutive windows, train + test, all 9 methods (2026-06-09)
+
+User asked for a substantial extension: include **all methods we have** (current 6 + γ + ε linear + ε MLP), show **both training and testing trajectories**, and pick **consecutive time steps so each sample shows 5 consecutive 1-s forecasts stitched into a 5-second trajectory**. Resolutions captured in the four AskUserQuestion rounds inside this session.
+
+#### What changed
+
+| aspect | before | after |
+|---|---|---|
+| Methods plotted | persistence, P1, v1, v2, β-50ep, β-200ep (6) | + γ + ε linear + ε MLP (9 total) |
+| Sample horizon shown | 1 s (10 frames) per sample | 5 s (50 frames) per sample, stitched from 5 consecutive 1-s forecasts |
+| Splits shown | test only | train AND test |
+| Output PNGs | 3 (random / moving / static, test) | 6 (random / moving / static, × test / train) |
+| Inference per method | 1 forward per sample | 5 forwards per sample (independent — each uses GT history) |
+| Motion threshold pool | test pool, 1-s window | test pool, 5-s window |
+
+#### Key implementation decisions
+
+- **5-s eligibility filter.** Centers near session boundaries can't support a 5-s forecast chain (need 50 future frames). Filter applied AFTER the train/test split, so classification matches what models actually saw at training time. Filtered out: 1,587 train + 3,599 test samples near boundaries → 10,376 train + 1,656 test eligible.
+- **Motion classification on the 5-s window.** Peak xy speed during the 50-frame future window (was 9-frame diff before). Threshold set from the test pool (top 30 %): **41.82 mm/frame** (cf. 40.10 for the 1-s window used in high_motion_subset.py). Applied to both train and test pools so "moving" means the same thing across both.
+- **GT-history at every inference call.** Each of the 5 inferences per sample uses the true CoM/keypoints/tactile up to the moment of inference — *not* the model's previous prediction. Mirrors real deployment (model fires every 0.1 s with whatever the sensor currently reports). Independent calls placed adjacent on the time axis.
+- **ε source import.** `compare_trajectories.py` lives in `train/com/` but ε's model classes live in `train/tactile_direct/`. Added `sys.path.insert(0, os.path.join(_TRAIN, 'tactile_direct'))` so `from model_epsilon import ...` works. Wrapped in try/except so the script degrades gracefully if ε isn't present.
+- **Inference vectorization.** Build a flat list of 5 × N = 150 inference centers (where N = 30 unique starting points across train+test), run each method's forward pass once on the full flat list, then reshape (150, 10, 3) → (30, 5, 10, 3) → (30, 50, 3) per method. Avoids the naive 150-separate-forward-calls anti-pattern.
+
+#### Smoke test passed (laptop, no tactile cache)
+
+```
+samples (1-s eligible): total=17218, train=11963, test=5255
+samples (5-s eligible): train=10376, test=1656
+motion threshold (top 30% of TEST pool, 5-s window): 41.82 mm/frame
+  test  partition: moving=454,  static=1202
+  train partition: moving=6679, static=3697
+unique starting centers needing inference: 30
+flat inference points: 150
+4 methods rendered: persistence, phase1_gru_com, phase2_v1_gru_kp, phase2_v2_gru_kp
+6 PNGs written: example_trajectories_{test, moving_test, static_test, train, moving_train, static_train}.png
+```
+
+#### One interesting finding from the smoke test
+
+Train pool has dramatically more motion than test pool:
+- train: 64 % moving (6,679 / 10,376) under the *test-pool* threshold of 41.82 mm/frame
+- test:  27 % moving (   454 /  1,656) under the same threshold
+
+This is because the 70/30 chronological split per session puts the early activity-rich portion of each recording in train and the later idle-heavy portion in test. **Implication for interpretation:** train-set "moving" samples are *not* directly comparable in distribution to test-set "moving" samples — the train pool's moving samples include more dynamic motion on average. When reading the train-vs-test trajectory comparisons, expect train predictions to look better than test even after controlling for the moving / static split, *partly because models had more diverse motion in training*. Worth noting in any writeup.
+
+#### Launch on CRC
+
+After the next pull on CRC, all 9 methods will be plotted (β / γ / ε require the tactile cache, which is only on CRC):
+
+```bash
+python -u train/com/compare_trajectories.py 2>&1 | tee train/com/output/compare_trajectories/run.log
+```
+
+Outputs under `train/com/output/compare_trajectories/`:
+- 6 PNGs (3 test + 3 train)
+- `metadata.json` — indices, frame centers, subjects, peak speeds for each picked sample
+
+#### What was deferred
+
+- **3D visualization of predictions.** User flagged this explicitly: *"ultimately i want to have a visualization of prediction in 3D, we could leave this for now and discuss more later."* Recorded; future task.
+
 #### What this run will tell us
 
 Three result regimes, mapped to the falsifiable hypotheses from the plan section above:
