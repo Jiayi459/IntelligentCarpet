@@ -1,5 +1,9 @@
 {
   "seed": 42,
+  "history_frames": 100,
+  "horizon_frames_per_inference": 10,
+  "seconds_per_sample": 5,
+  "total_horizon_frames": 50,
   "n_samples_per_subset": 5,
   "methods_plotted": [
     "persistence",
@@ -7,99 +11,197 @@
     "phase2_v1_gru_kp",
     "phase2_v2_gru_kp",
     "phase2_tactile_50ep",
-    "phase2_tactile_200ep"
+    "phase2_tactile_200ep",
+    "phase2_gamma",
+    "phase2_epsilon_linear",
+    "phase2_epsilon_mlp"
   ],
-  "moving_threshold_mm_per_frame": 40.10069406461301,
+  "moving_threshold_mm_per_frame": 41.822705822974406,
+  "moving_threshold_source_pool": "test",
   "subsets": {
-    "random": {
-      "sample_indices_in_test": [
-        4064,
-        2305,
-        3438,
-        468,
-        2275
-      ],
-      "sample_frame_centers": [
-        25679,
-        17563,
-        25053,
-        3385,
-        17189
-      ],
-      "sample_subjects": [
-        "YiyueLuo",
-        "TongZhang",
-        "YiyueLuo",
-        "MantianXue",
-        "TongZhang"
-      ],
-      "peak_xy_speed_mm_frame": [
-        15.589580267764617,
-        84.00417727286728,
-        40.93041931387569,
-        22.022190472465788,
-        12.581254633450857
-      ]
+    "test": {
+      "random": {
+        "sample_position_in_pool": [
+          1279,
+          726,
+          1082,
+          147,
+          717
+        ],
+        "sample_start_frame_centers": [
+          25601,
+          25048,
+          25404,
+          24469,
+          25039
+        ],
+        "sample_subjects": [
+          "YiyueLuo",
+          "YiyueLuo",
+          "YiyueLuo",
+          "YiyueLuo",
+          "YiyueLuo"
+        ],
+        "peak_xy_speed_5s_mm_frame": [
+          17.76717697978292,
+          41.822705822974406,
+          22.22787890285693,
+          53.562245369934715,
+          41.822705822974406
+        ]
+      },
+      "moving": {
+        "sample_position_in_pool": [
+          1516,
+          115,
+          1070,
+          1367,
+          1355
+        ],
+        "sample_start_frame_centers": [
+          26610,
+          24437,
+          25392,
+          25689,
+          25677
+        ],
+        "sample_subjects": [
+          "YiyueLuo",
+          "YiyueLuo",
+          "YiyueLuo",
+          "YiyueLuo",
+          "YiyueLuo"
+        ],
+        "peak_xy_speed_5s_mm_frame": [
+          43.538061449076416,
+          53.562245369934715,
+          48.24194421895734,
+          46.7088877800238,
+          46.7088877800238
+        ]
+      },
+      "static": {
+        "sample_position_in_pool": [
+          778,
+          1307,
+          718,
+          623,
+          326
+        ],
+        "sample_start_frame_centers": [
+          25100,
+          25629,
+          25040,
+          24945,
+          24648
+        ],
+        "sample_subjects": [
+          "YiyueLuo",
+          "YiyueLuo",
+          "YiyueLuo",
+          "YiyueLuo",
+          "YiyueLuo"
+        ],
+        "peak_xy_speed_5s_mm_frame": [
+          28.918332284032477,
+          21.054732316731076,
+          41.822705822974406,
+          16.849412364194023,
+          40.42612443261317
+        ]
+      }
     },
-    "moving": {
-      "sample_indices_in_test": [
-        5122,
-        392,
-        2051,
-        3956,
-        3455
-      ],
-      "sample_frame_centers": [
-        31769,
-        2965,
-        15589,
-        25571,
-        25070
-      ],
-      "sample_subjects": [
-        "ZeyuWu",
-        "MantianXue",
-        "TongZhang",
-        "YiyueLuo",
-        "YiyueLuo"
-      ],
-      "peak_xy_speed_mm_frame": [
-        87.03468495889136,
-        68.27826776524424,
-        66.42244864339622,
-        44.903012806525524,
-        40.87432117811946
-      ]
-    },
-    "static": {
-      "sample_indices_in_test": [
-        2940,
-        4350,
-        2703,
-        2238,
-        1225
-      ],
-      "sample_frame_centers": [
-        24555,
-        26697,
-        20586,
-        16980,
-        9372
-      ],
-      "sample_subjects": [
-        "YiyueLuo",
-        "YiyueLuo",
-        "WanShou",
-        "TongZhang",
-        "PingchuanMa"
-      ],
-      "peak_xy_speed_mm_frame": [
-        25.352429280745174,
-        11.373660907996946,
-        24.09287641494014,
-        8.077926656480452,
-        20.376245567986164
-      ]
+    "train": {
+      "random": {
+        "sample_position_in_pool": [
+          5657,
+          2357,
+          4673,
+          4599,
+          8533
+        ],
+        "sample_start_frame_centers": [
+          21705,
+          9915,
+          19722,
+          19499,
+          26158
+        ],
+        "sample_subjects": [
+          "YiyueLuo",
+          "PingchuanMa",
+          "WanShou",
+          "WanShou",
+          "YiyueLuo"
+        ],
+        "peak_xy_speed_5s_mm_frame": [
+          29.275172551916228,
+          99.41145950676156,
+          60.35791292077557,
+          29.83883031269707,
+          95.01336600325757
+        ]
+      },
+      "moving": {
+        "sample_position_in_pool": [
+          1565,
+          8952,
+          8730,
+          2572,
+          6535
+        ],
+        "sample_start_frame_centers": [
+          6544,
+          27103,
+          26355,
+          10726,
+          22583
+        ],
+        "sample_subjects": [
+          "MikeFoshey",
+          "YunzhuLi",
+          "YiyueLuo",
+          "PingchuanMa",
+          "YiyueLuo"
+        ],
+        "peak_xy_speed_5s_mm_frame": [
+          64.08700376319962,
+          68.04589327445987,
+          58.253907083064135,
+          98.99637163371945,
+          41.962385447430016
+        ]
+      },
+      "static": {
+        "sample_position_in_pool": [
+          9251,
+          7842,
+          5523,
+          10029,
+          7242
+        ],
+        "sample_start_frame_centers": [
+          28147,
+          23890,
+          21571,
+          31309,
+          23290
+        ],
+        "sample_subjects": [
+          "YunzhuLi",
+          "YiyueLuo",
+          "YiyueLuo",
+          "ZeyuWu",
+          "YiyueLuo"
+        ],
+        "peak_xy_speed_5s_mm_frame": [
+          30.129536824497247,
+          19.832076934894143,
+          37.559965055726025,
+          28.490678937994854,
+          16.558992893360788
+        ]
+      }
     }
   }
 }
