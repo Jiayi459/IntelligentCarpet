@@ -2544,3 +2544,165 @@ Acceptance threshold (#7 in the OPEN QUESTIONS resolutions) decided after the fi
 
 ---
 
+### Cross-experiment tactile analysis — what tactile actually gives us (2026-06-10)
+
+User asked, after seeing ε's failure and the wiggly-trajectory diagnosis: *"why tactile input didn't get the good prediction, is there any method we can learn what tactile data can actually give us? can we try let the model generate the tactile data to see the results?"* The user also said: *"before running these experiments, update these analysis we have"* — explicit instruction to write the analysis BEFORE proposing any more experiments. This section synthesizes three questions across **every tactile experiment in the project** and proposes diagnostic experiments to run BEFORE any more SSL retries.
+
+#### Pattern across all tactile experiments
+
+Every tactile-based forecaster has converged to the same conclusion: **tactile does not add CoM-forecasting information beyond what CoM history alone provides.**
+
+| method | MOVING median (mm) | skill vs persistence | adds info over Phase 1 (105 mm)? |
+|---|---:|---:|---|
+| persistence | 132.9 | 1.000 | — |
+| Phase 1 (CoM history → CoM) | 104.5 | 0.786 | reference |
+| **β-200ep** (tactile-only CNN → CoM) | 111.2 | 0.837 | NO — worse than Phase 1 |
+| **γ** (tactile + CoM history → CoM) | 104.5 | 0.786 | **TIED with Phase 1** (key finding) |
+| **ε MLP** (SSL ViT → CoM) | 132.6 | 0.998 | NO — equals persistence |
+
+The most telling row is γ. γ has access to BOTH tactile AND CoM history; the model could freely use both. It chose to ride the CoM-history branch and gain nothing from the tactile branch. **This is the strongest evidence in our experiments that tactile carries near-zero CoM-forecasting signal beyond what CoM history already encodes.**
+
+ε's failure adds an architectural caveat: even with a CNN-free ViT encoder + SSL pretraining, no signal emerged. So "encoder bottleneck" is not the sole story. And the wiggly-trajectory finding from the compare_trajectories plots adds qualitative confirmation: ε's output structure is uncorrelated noise within each 1-s segment, the visual signature of a probe head fed an uninformative hidden state.
+
+#### Four candidate explanations for why tactile fails at *forecasting*
+
+**1. Tactile is a *consequence* of CoM motion, not a leading indicator.**
+The original hypothesis was that small weight-shifts precede CoM displacement (the "pre-movement signal"). On data where people stand mostly still and occasionally transition (sit↔stand, step), this may be wrong. When CoM moves, pressure redistributes — *concurrently*, not in advance. At 10 fps, the lag between "weight shift" and "CoM motion" may be < 100 ms, which collapses into a single frame.
+
+Quantitative check this could be confirmed by: cross-correlate tactile centroid (CoP) with CoM at lags of −10..+10 frames. If peak correlation is at lag 0 (or even at lag +1, meaning CoM leads CoP), the hypothesis dies. CoP is already computed (`compute_cop.py`); CoM is the ground truth. ~30 minutes to check.
+
+**2. The 10 fps sampling rate is too slow.**
+Biomechanics literature places center-of-pressure micro-shifts at 50-100 Hz. Aliased down to 10 fps, the predictive structure is wiped out. The dataset can't be re-sampled higher; this would be a fundamental limit if true.
+
+**3. The signal exists but is buried in tactile noise.**
+Breathing, posture micro-adjustments, calibration drift — all add tactile signal that has no CoM-forecasting value. Signal-to-noise in the "delta tactile" target may be very low. ε's Stage 2 dynamics MSE of 0.937 (vs 1.0 baseline) is consistent with "model learns 6 % of variance" which is the noise-floor signature.
+
+**4. CoM is camera-derived and has its own lag.**
+The "ground truth" CoM comes from triangulated 2D keypoints. There's an unknown lag/smoothing in the camera pipeline. If camera-CoM lags by ~50 ms, then tactile-vs-CoM comparisons are biased: tactile at frame t correlates with CoM at frame t−1 (the past), making "forecasting CoM" look harder than it should be.
+
+Of these four, **(1) is the most actionable** because the CoP-vs-CoM correlation can be measured directly. If lag is 0 or negative, hypothesis (1) is confirmed and we'd stop trying to forecast CoM from tactile in the current framing.
+
+#### What tactile CAN give us — answering the user's second question
+
+Even if tactile fails at *forecasting future CoM*, it almost certainly succeeds at several other tasks. The right way to find out is to use tactile as INPUT in a **probe-suite** of diagnostic tasks that vary in difficulty and timing:
+
+| task | input | target | expected outcome |
+|---|---|---|---|
+| (a) **Current pose** | tactile(t) | 21 keypoints at t | strong — this is the original IntelligentCarpet paper |
+| (b) **Current CoM** | tactile(t) | CoM(t) — same frame, not future | **near-zero error expected** — CoM is the centroid of pressure × weight |
+| (c) **Foot contact location** | tactile(t) | (xy) center of largest active blob | trivial — directly from threshold |
+| (d) **Standing / sitting / lying** | tactile(t) | 3-way classifier | should be easy |
+| (e) **Body mass** | mean tactile across a session | total weight | direct integral of pressure × calibration |
+| (f) **Pre-step detection (event)** | tactile(t−99..t) | binary "foot lifts in next 0.5 s" | unknown — this is the closest to "forecasting" but as a classification task |
+| (g) **Next CoP position** | tactile(t−99..t) | CoP(t+1..t+10) | unknown — forecast CoP, not CoM. Avoids the camera-derived ground-truth issue |
+
+**(b) is the most informative diagnostic.** If a trivial linear regression from tactile(t) to CoM(t) gets near-zero error, that proves: "tactile carries the information needed to KNOW current CoM, but not to PREDICT future CoM." Which is consistent with hypothesis (1) above.
+
+**(f) and (g) are reframings of the forecasting question that might succeed where the CoM-regression version fails.** (g) is particularly interesting: forecasting tactile-derived quantities (CoP) from tactile avoids the camera-bias issue (4) entirely.
+
+#### Can we let the model GENERATE the tactile data? — answering the user's third question
+
+Yes — and we have most of the machinery already. ε's `DynamicsModel.forward()` literally outputs predicted future tactile frames (the `(B, 10, 96, 96)` output of the factored patch-latent decoder). Stage 2 trained it to do this. We never visualized the results.
+
+**Proposed experiment: `generate_future_tactile.py`** — load ε's `dynamics_model.pt`, feed in real tactile windows from the test set, output predicted future tactile frames. Visualize:
+
+```
+For 3-5 test starting points (one static, one moving, one transition):
+  Row 1 : true tactile at t−2, t−1, t                 (history, last 3 frames)
+  Row 2 : true tactile at t+1, t+2, ..., t+10          (ground truth future)
+  Row 3 : predicted tactile at t+1, t+2, ..., t+10     (model's output)
+  Row 4 : difference (prediction − truth), diverging colormap
+```
+
+What this would tell us:
+- **If predictions look like "current frame copied 10 times"** → the model defaulted to tactile-persistence. Confirms ε learned nothing dynamic. Consistent with the metrics.
+- **If predictions show plausible motion (even wrong)** → the model learned *something* about tactile dynamics but it didn't transfer to CoM. Tells us SSL succeeded but the representation isn't CoM-aligned.
+- **If predictions look like static noise / mean tactile** → mode collapse during SSL. Different failure mode than persistence.
+
+The third case would be the most surprising and informative. The first is what I'd weakly bet on given the metrics.
+
+Cost estimate: ~2 hours to write + run. Uses existing checkpoints; no retraining. Can be run on CRC where the cache lives.
+
+#### Proposed experiment order (before any SSL retry)
+
+| order | experiment | cost | answers |
+|---:|---|---|---|
+| 1 | **CoP-vs-CoM lag analysis** | 30 min | Is tactile signal contemporaneous or leading? (hypothesis 1) |
+| 2 | **Tactile → current CoM probe** | 1 h | Does tactile have *any* CoM info, just not the *future* CoM info? (task b) |
+| 3 | **Generate-future-tactile visualization** | 2 h | What did ε's Stage 2 actually learn? |
+| 4 | **CoP-forecasting probe** | 2 h | Does the forecasting failure go away when we predict tactile-derived (not camera-derived) future? (task g) |
+| 5 | (only after 1-4 land) Decide between ε retry options A/B/C from the prior write-up | — | Whether to keep trying CoM forecasting from tactile |
+
+The user's framing — "before running these experiments, update the analysis" — points at experiments 1-4 first. SSL retries (the original A/B/C/D/E menu from the ε first-run section) should wait until we've answered the diagnostic questions, because **if experiment 1 confirms tactile is contemporaneous-not-leading, the whole SSL retry direction is the wrong bet.**
+
+#### What I'd push back on
+
+Two paths I'd push back on if proposed:
+
+- **"Just throw more compute at SSL retry."** ε ran the canonical recipe and got noise. The hypothesis that worked-but-needed-more-epochs is *possible* but less likely than the hypothesis that the prediction target is the wrong target. Spending more compute before checking the target is backwards.
+- **"Pivot to a completely different forecasting target without diagnosing why CoM failed."** Switching to predicting (say) CoP or foot velocity might work, but we wouldn't know *why* and the project's central scientific question (CoM forecasting from tactile) would remain unanswered. Better to diagnose first.
+
+#### Status
+
+This is a **planning document, not an execution plan**. No code written yet for any of the 4 diagnostic experiments. Awaiting user resolution on which to run and in what order.
+
+#### Diagnostics 1–3 implemented (2026-06-10, same session)
+
+User picked diagnostics (1), (2), (3) — skipped (4) CoP-forecasting probe. Order of execution will be (1) → (2) → (3) for cheapest-first. Three new scripts under `train/com/`:
+
+| file | purpose | LOC | runs on |
+|---|---|---:|---|
+| `cop_com_lag_analysis.py` | CoP-vs-CoM velocity cross-correlation at lags ±10 frames; settles whether tactile is a leading or contemporaneous indicator | 246 | CRC (needs cop_results.p + com_results.p) |
+| `tactile_to_com_probe.py` | Linear + tiny-MLP probes from tactile(t) → CoM(t); tests whether tactile carries instantaneous-CoM information | 274 | CRC (needs tactile cache + tactile_stats.json) |
+| `generate_future_tactile.py` | Loads ε's `dynamics_model.pt`; visualizes predicted vs true future tactile as 4-row grids (history / true future / ε predicted / diff); plus aggregate ε-vs-persistence MSE over the full test set | 318 | CRC (needs tactile cache + ε checkpoint) |
+
+All three follow project conventions:
+- `_HERE = os.path.dirname(os.path.abspath(__file__))`, paths to `train/com/output/` derived from there.
+- Module-level imports / class defs only — heavy work gated inside `main()`.
+- `if __name__ == '__main__': main()` guard so they can be imported without side effects.
+- CRC-only by design: each fails fast with a clear `raise SystemExit(...)` message when a required cache file isn't present locally.
+
+**Architectural choices worth flagging:**
+
+- **(1) lag analysis works on VELOCITY (first difference), not position.** Position correlation between CoP and CoM would trivially be ≈1 at all lags (people don't teleport). The scientifically interesting question is "do velocity shifts in CoP precede velocity shifts in CoM" — hence first-differencing. The script also reports a motion-only subset (frames where |d_CoM_xy| > 5 mm/frame default) to remove static-noise dilution.
+- **(2) probe trains on individual frames, NOT windows.** Each test-set frame (subject to outlier filter) is a sample; ~22.8k train + ~9.8k test. Linear probe is a `Linear(9216, 3)` (~28K params); MLP is `Linear(9216→128) → ReLU → Linear(128, 3)` (~1.2M params). Both trained 30 epochs with best-val checkpointing. Same standardization stats as β / γ / ε (reads `tactile_stats.json`).
+- **(3) visualization renders the FULL 10-frame future** per sample, plus the aggregate stat across all test samples. The aggregate is the decisive number: if `ε_MSE / persistence_MSE` on active cells ≈ 1.0, ε defaulted to persistence (case A in the analysis above). If < 0.95, ε learned something (case B). The script prints a reading hint at the end.
+
+**Smoke-tested on laptop (no tactile cache, no cop_results.p).** All three:
+- Import side-effect-free.
+- CLI `--help` parses cleanly.
+- Each fails on missing inputs with explicit error message rather than a cryptic stacktrace.
+
+**Launch sequence on CRC** (after the next sync):
+
+```bash
+cd ~/IntelligentCarpet
+git pull --rebase origin main
+
+# 1. Lag analysis (~30 s on CPU; needs cop_results.p, which compute_cop.py should have produced)
+python -u train/com/cop_com_lag_analysis.py 2>&1 | tee train/com/output/cop_com_lag/run.log
+
+# 2. Tactile -> current CoM probe (~5-15 min on A10; trains 2 small models)
+qrsh -q gpu -l gpu_card=1 -pe smp 4 -l h_rt=02:00:00     # if not already on GPU
+module load conda && module load cuda/12.1
+conda activate carpet
+cd ~/IntelligentCarpet
+python -u train/com/tactile_to_com_probe.py 2>&1 | tee train/com/output/tactile_to_com_probe/run.log
+
+# 3. Generate future tactile (~2-5 min on A10; uses existing ε checkpoint, no training)
+python -u train/com/generate_future_tactile.py 2>&1 | tee train/com/output/generate_future_tactile/run.log
+```
+
+If `cop_results.p` is missing on CRC (it's gitignored as `train/com/output/*.p`), regenerate first:
+```bash
+python -u train/com/compute_cop.py
+```
+
+#### What each diagnostic will tell us, in plain terms
+
+- **(1)** Peak-lag location and value (Pearson r). If peak lag = 0 with r > 0.5, tactile and CoM move together — forecasting hypothesis weakly dies. If peak lag > 0 with r > 0.5, tactile leads CoM — forecasting hypothesis lives, and we'd want to figure out why ε didn't extract that signal. Negative peak lag would be a different surprise (camera pipeline lag).
+- **(2)** Median 3D error of `tactile(t) → CoM(t)`. If < 30 mm, tactile encodes CoM richly at the current frame — completes the picture together with (1). If > 100 mm, something else is wrong (data alignment, frame indexing).
+- **(3)** ε_MSE / persistence_MSE skill score on active cells. ≈ 1.0 → ε defaulted (case A). < 0.95 → ε learned dynamics (case B). The four-row grids will visually show whether predictions are flat-copies, mean-collapsed, or motion-plausible.
+
+After all three land, we decide the pivot question (instantaneous-tactile-tasks vs more SSL retries).
+
