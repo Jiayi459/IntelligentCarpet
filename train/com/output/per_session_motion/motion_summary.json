@@ -1,0 +1,153 @@
+{
+  "n_sessions": 135,
+  "n_subjects": 10,
+  "motion_thresholds_used": [
+    5.0,
+    10.0,
+    20.0,
+    40.0
+  ],
+  "transition_def": {
+    "velocity_threshold": 10.0,
+    "min_run_frames": 3,
+    "min_static_frames": 10
+  },
+  "aggregate": {
+    "transitions_per_session_mean": 0.4,
+    "transitions_per_session_median": 0.0,
+    "transitions_per_session_max": 11,
+    "sessions_with_zero_transitions": 98,
+    "total_transitions": 54
+  },
+  "motion_fraction_dataset_wide": {
+    "thr5": {
+      "mean": 0.8289348929129289,
+      "median": 0.8542713567839196,
+      "p95": 0.9763819095477387,
+      "sessions_below_1pct": 0
+    },
+    "thr10": {
+      "mean": 0.6316749337394051,
+      "median": 0.6683937823834197,
+      "p95": 0.9224402266107607,
+      "sessions_below_1pct": 0
+    },
+    "thr20": {
+      "mean": 0.3863028043768716,
+      "median": 0.34673366834170855,
+      "p95": 0.7819095477386935,
+      "sessions_below_1pct": 1
+    },
+    "thr40": {
+      "mean": 0.1564192822530905,
+      "median": 0.09547738693467336,
+      "p95": 0.4638190954773869,
+      "sessions_below_1pct": 9
+    }
+  },
+  "per_subject": {
+    "LiangShi": {
+      "n_sessions": 14,
+      "total_frames": 2780,
+      "velocity_p50": 11.1217587004308,
+      "velocity_p95": 44.460582863971325,
+      "velocity_p99": 60.80543496028774,
+      "motion_frac_thr10": 0.5366906474820143,
+      "n_transitions": 4
+    },
+    "MantianXue": {
+      "n_sessions": 15,
+      "total_frames": 2955,
+      "velocity_p50": 19.446695374844584,
+      "velocity_p95": 69.86599372966977,
+      "velocity_p99": 161.83751196265445,
+      "motion_frac_thr10": 0.7177664974619289,
+      "n_transitions": 2
+    },
+    "MikeFoshey": {
+      "n_sessions": 15,
+      "total_frames": 2980,
+      "velocity_p50": 16.065580771550394,
+      "velocity_p95": 61.53056726821432,
+      "velocity_p99": 102.7555206086045,
+      "motion_frac_thr10": 0.6734899328859061,
+      "n_transitions": 3
+    },
+    "PingchuanMa": {
+      "n_sessions": 15,
+      "total_frames": 2951,
+      "velocity_p50": 14.82452748039943,
+      "velocity_p95": 78.97782941615692,
+      "velocity_p99": 111.91864150989609,
+      "motion_frac_thr10": 0.6272450016943409,
+      "n_transitions": 6
+    },
+    "TimErps": {
+      "n_sessions": 15,
+      "total_frames": 2943,
+      "velocity_p50": 13.974260176586586,
+      "velocity_p95": 69.66088137638614,
+      "velocity_p99": 150.15765048745226,
+      "motion_frac_thr10": 0.6146788990825688,
+      "n_transitions": 8
+    },
+    "TongZhang": {
+      "n_sessions": 15,
+      "total_frames": 2943,
+      "velocity_p50": 11.0238978282419,
+      "velocity_p95": 63.141490568378565,
+      "velocity_p99": 162.77157899941673,
+      "motion_frac_thr10": 0.5331294597349643,
+      "n_transitions": 5
+    },
+    "WanShou": {
+      "n_sessions": 15,
+      "total_frames": 2969,
+      "velocity_p50": 15.298742844528025,
+      "velocity_p95": 60.35527310780225,
+      "velocity_p99": 145.30658193713222,
+      "motion_frac_thr10": 0.6567867969013136,
+      "n_transitions": 3
+    },
+    "YiyueLuo": {
+      "n_sessions": 2,
+      "total_frames": 5998,
+      "velocity_p50": 11.932927716246738,
+      "velocity_p95": 42.77363821940024,
+      "velocity_p99": 59.19515602432327,
+      "motion_frac_thr10": 0.565188396132044,
+      "n_transitions": 14
+    },
+    "YunzhuLi": {
+      "n_sessions": 15,
+      "total_frames": 2985,
+      "velocity_p50": 18.7461704843867,
+      "velocity_p95": 69.04863438040405,
+      "velocity_p99": 125.55002194413333,
+      "motion_frac_thr10": 0.7306532663316583,
+      "n_transitions": 2
+    },
+    "ZeyuWu": {
+      "n_sessions": 14,
+      "total_frames": 2786,
+      "velocity_p50": 12.201561127270926,
+      "velocity_p95": 60.54300269953193,
+      "velocity_p99": 108.95355078770339,
+      "motion_frac_thr10": 0.5804020100502513,
+      "n_transitions": 7
+    }
+  },
+  "verdict_lines": [
+    "==============================================================================",
+    "MOTION-CONTENT VERDICT",
+    "==============================================================================",
+    "sessions analyzed: 135; subjects: 10",
+    "motion fraction at >10 mm/frame: median=0.668  p95=0.922",
+    "sessions with <1% motion frames: 0/135",
+    "transitions detected: total=54, sessions with zero transitions: 98/135",
+    "",
+    "-> Motion content is moderate and roughly homogeneous.",
+    "   Neither extreme verdict; both factors plausibly contribute.",
+    "=============================================================================="
+  ]
+}

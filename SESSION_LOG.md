@@ -2706,3 +2706,95 @@ python -u train/com/compute_cop.py
 
 After all three land, we decide the pivot question (instantaneous-tactile-tasks vs more SSL retries).
 
+---
+
+### Diagnostics 1–3 results + per-session motion analysis (2026-06-12)
+
+User ran the three diagnostics on CRC + pulled the results back. We also ran a per-session motion-content analysis to settle the open repeatability-vs-sampling-rate debate. All four pieces of data point in one direction.
+
+#### Diagnostic 1 — CoP-CoM lag correlation: signal is real but functionally zero
+
+**Peak lag = +1 frame (100 ms)** for both axes — CoP precedes CoM, biomechanically consistent with weight-shift-before-body-motion. But the peak Pearson r is essentially noise floor:
+
+| regime | axis | peak lag | peak r |
+|---|---|---:|---:|
+| all frames | x | +1 | 0.040 |
+| all frames | y | +1 | 0.029 |
+| motion-only | x | +1 | 0.044 |
+| motion-only | y | +1 | 0.035 |
+
+The standard deviation across sessions is ~0.06 — larger than the peak signal. r ≈ 0.04 → r² ≈ 0.16 % of variance explained. The "tactile leads CoM" hypothesis is technically true (correct sign on the lag) but **practically dead** at 10 fps. No model can extract useful prediction from a signal this weak.
+
+#### Diagnostic 2 — tactile(t) → CoM(t): 234 mm error explained by body geometry
+
+| method | median 3D (mm) | median x | median y | median z | best-val MSE |
+|---|---:|---:|---:|---:|---:|
+| mean baseline | 539 | 267 | 203 | 231 | — |
+| linear probe | 292 | 141 | 121 | 112 | 0.136 |
+| MLP probe | **234** | 97 | 83 | 79 | 0.030 |
+
+Both probes beat baseline by ~2×, but median 3D error stays at ~234 mm. The scatter plots show predictions form a **horizontal blob** around the population-mean CoM, not a tight diagonal — model is mostly predicting "the average CoM" with small adjustments based on which part of the carpet is active.
+
+**Mechanistic explanation:** tactile shows feet, CoM is at hip (~80-100 cm above feet, varying with body geometry and pose). A linear probe (or even a small MLP) can't infer the hip's 3-D position from foot pressure without a body model. The MLP's better val-MSE (0.030 vs 0.136) shows it can localize feet much better than linear, but it still hits the hip-vs-feet offset ceiling for the 3-D CoM target.
+
+This is a **real positive finding** packaged inside a negative: tactile does carry CoM information (2× better than baseline), but extracting precise CoM requires a body model. The original IntelligentCarpet CNN gets sub-decimeter pose because it has the heatmap-output architecture suited to this; our probe doesn't. Cleanly suggests Path A (instantaneous tactile pose with a proper architecture) is the most attractive next direction.
+
+#### Diagnostic 3 — generate future tactile: ε *is* tactile-persistence
+
+Aggregate over the 5,255-sample test set:
+
+| metric | ε | tactile persistence | skill |
+|---|---:|---:|---:|
+| MSE all cells | 0.0001957 | 0.0001982 | 0.987 |
+| MSE active cells | 0.0001831 | 0.0001857 | 0.986 |
+
+Per-sample numbers are tighter: ε vs persistence differ at the **8th decimal place**. The "moving sample" PNG shows predicted future frames are visually indistinguishable from the current frame; the diff row is essentially zero except where the truth had motion ε didn't predict.
+
+**Case A confirmed.** Stage 2 SSL collapsed to copy-current-frame. The 1.3 % aggregate skill score is a tiny systematic shift, not learned dynamics.
+
+#### Per-session motion analysis (settles the debate)
+
+Ran `per_session_motion_analysis.py` on the laptop (only needs `com_results.p`, no tactile cache). Across 135 sessions / 10 subjects:
+
+| metric | value |
+|---|---:|
+| Sessions with <1 % motion frames (>10 mm/frame) | **0 / 135** |
+| Median motion fraction at >5 mm/frame | **0.854** (85.4 %) |
+| Median motion fraction at >10 mm/frame | **0.668** (66.8 %) |
+| Median motion fraction at >20 mm/frame | 0.347 |
+| Median motion fraction at >40 mm/frame | 0.095 |
+| Total transitions detected (sit↔stand-style discrete events) | **54** |
+| Sessions with ZERO detected transitions | **98 / 135** |
+| Subject with most transitions (YiyueLuo) | 11 in one session |
+
+The transitions-per-session bar chart shows the long tail — one session has 11 transitions, ~35 sessions have 1–3, the rest (98 sessions) have zero.
+
+**Verdict:** Motion is *everywhere* in the dataset (this surprised me). Median session has 66.8 % of frames moving at >10 mm/frame, and even substantial movement (>40 mm/frame) appears in ~10 % of frames per session. But discrete *events* — the kind that recur and form learnable patterns — are sparse and uneven.
+
+This means: **the motion isn't absent, it's just not repeatable in the way forecasting needs.** Continuous walking / weight shifting at 10 fps doesn't produce learnable 1-s temporal patterns. The 1-s horizon is many gait cycles into the future, which is essentially unpredictable from past CoM alone.
+
+#### Resolution of the repeatability vs sampling-rate debate
+
+User's framing wins, with refinement. User's revised position (2026-06-12): forecasting needs **BOTH** (a) CoM changes large enough to matter AND (b) repeated event structure the model can learn from. The dataset has (a) but not (b). Claude's sampling-rate framing was upstream-correct but practically less load-bearing — the motion at our scale IS visible at 10 fps; the problem is that the visible motion is continuous-unrepeated rather than discrete-recurring.
+
+The 10 fps aliasing matters only for pre-movement micro-signal (diagnostic 1's r ≈ 0.04 suggests this signal is at noise floor too) — but even if we had infinite sampling rate, predicting "what will this walking person do next" from past CoM is not solvable, because each person walks differently.
+
+#### Implications for the original 3 paths
+
+- **Path A (instantaneous tactile pose):** Strongest case. Diagnostic 2 shows tactile carries 2× more CoM info than baseline; a proper architecture (CNN or ViT, finetuned from MAE) should close the hip-vs-feet gap dramatically. Aligns with the original IntelligentCarpet paper's task. Lots of motion variety in the data → diverse training examples.
+- **Path B (event detection):** Weakened. Only 54 transitions across 135 sessions means insufficient data for a transition classifier. Loosening the transition definition might help; we'd need event labels we don't currently have.
+- **Path C (close project, write up honest negative):** Increasingly attractive. We've now demonstrated cleanly *why* 1-s CoM forecasting fails: motion is present but unrepeated.
+
+User raised possibility (2026-06-12): **if motion / events aren't enough on this dataset, switch to a different dataset.** This is Path D — find or collect data that has both magnitude AND repeated event structure. Discussion ongoing.
+
+#### Files added in this round
+
+| file | what |
+|---|---|
+| `train/com/per_session_motion_analysis.py` | per-session motion stats; produces CSV + JSON + 3 PNGs |
+| `train/com/output/per_session_motion/per_session_motion.csv` | one row per session (135 rows) |
+| `train/com/output/per_session_motion/motion_summary.json` | aggregates + per-subject summary + verdict |
+| `train/com/output/per_session_motion/motion_fraction_distribution.png` | 4-panel histogram, one per threshold |
+| `train/com/output/per_session_motion/transitions_per_session.png` | bar chart of transitions, colored by subject |
+| `train/com/output/per_session_motion/velocity_box_per_subject.png` | box plot of velocity distributions per subject |
+
