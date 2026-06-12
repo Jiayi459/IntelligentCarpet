@@ -1,0 +1,59 @@
+{
+  "epsilon_checkpoint": "/users/jhao3/IntelligentCarpet/train/com/output/phase2_epsilon/dynamics_model.pt",
+  "epsilon_best_val_mse": 0.9368291842310053,
+  "epsilon_epoch": 11,
+  "active_threshold": 0.05,
+  "aggregate": {
+    "epsilon_mse_all": 0.00019572456450905453,
+    "persistence_mse_all": 0.0001982229666687719,
+    "epsilon_mse_active": 0.00018307786906340758,
+    "persistence_mse_active": 0.00018573181913971807,
+    "n_test_samples": 5255,
+    "n_active_cells_total": 460359300,
+    "n_all_cells_total": 484300800
+  },
+  "per_sample": [
+    {
+      "epsilon_mse_all": 0.0001863758807303384,
+      "epsilon_mse_active": 0.00017635503900237381,
+      "persistence_mse_all": 0.0001863701327238232,
+      "persistence_mse_active": 0.00017633175593800843,
+      "n_active_cells_at_t": 9076,
+      "mean_pressure_at_t": 0.07437483966350555,
+      "max_pressure_at_t": 0.4289156496524811,
+      "regime": "static",
+      "sample_index": 0,
+      "idx_in_test_pool": 598,
+      "t0_frame": 4375,
+      "v_future_at_t0": 11.094027137745625
+    },
+    {
+      "epsilon_mse_all": 0.00014751126582268625,
+      "epsilon_mse_active": 0.0001328031503362581,
+      "persistence_mse_all": 0.00014749320689588785,
+      "persistence_mse_active": 0.0001327513309661299,
+      "n_active_cells_at_t": 8756,
+      "mean_pressure_at_t": 0.06366428732872009,
+      "max_pressure_at_t": 0.3723849356174469,
+      "regime": "transition",
+      "sample_index": 0,
+      "idx_in_test_pool": 4138,
+      "t0_frame": 25753,
+      "v_future_at_t0": 22.12094975500871
+    },
+    {
+      "epsilon_mse_all": 0.00018307457503397018,
+      "epsilon_mse_active": 0.00017062414553947747,
+      "persistence_mse_all": 0.00018300514784641564,
+      "persistence_mse_active": 0.00017052698240149766,
+      "n_active_cells_at_t": 8934,
+      "mean_pressure_at_t": 0.07173255831003189,
+      "max_pressure_at_t": 0.4669811427593231,
+      "regime": "moving",
+      "sample_index": 0,
+      "idx_in_test_pool": 2596,
+      "t0_frame": 19774,
+      "v_future_at_t0": 66.56960033888711
+    }
+  ]
+}

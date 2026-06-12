@@ -1,0 +1,10 @@
+{
+  "tactile_mean": 0.06668976694345474,
+  "tactile_std": 0.014857163652777672,
+  "n_sample_windows": 1000,
+  "history": 100,
+  "seed": 42,
+  "source": "phase2_tactile RNG-replayed sample",
+  "n_total_samples": 17218,
+  "n_train_samples": 11963
+}
