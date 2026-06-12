@@ -1,0 +1,41 @@
+{
+  "session_index": 104,
+  "subject": "YiyueLuo",
+  "date": "2020-10-24",
+  "round": "10",
+  "session_frames": 5000,
+  "n_transitions": 11,
+  "transition_frames_global": [
+    21156,
+    21182,
+    21212,
+    21521,
+    21886,
+    22259,
+    25366,
+    25467,
+    25524,
+    25549,
+    25795
+  ],
+  "n_train_samples": 3423,
+  "n_test_samples": 1468,
+  "n_pos_train": 60,
+  "n_pos_test": 45,
+  "pos_weight": 58.250003814697266,
+  "finetuned": false,
+  "epsilon_epoch": 11,
+  "epsilon_best_val_mse": 0.9368291842310053,
+  "test_metrics": {
+    "auroc": 0.752416647146092,
+    "accuracy_at_05": 0.3637602179836512,
+    "precision_at_05": 0.04503582395087001,
+    "recall_at_05": 0.9777777777777777,
+    "tp": 44,
+    "fp": 933,
+    "tn": 490,
+    "fn": 1,
+    "baseline_auroc": 0.5,
+    "baseline_accuracy": 0.9693460490463215
+  }
+}
